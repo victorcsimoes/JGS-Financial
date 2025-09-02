@@ -1,4 +1,4 @@
-# app.py — Painel Financeiro | JVSeps (log listado na aba Ativa + excluir/baixar)
+# app.py — Painel Financeiro | JVSeps (IBOV + SELIC + LOG com excluir/baixar)
 import datetime as dt
 import numpy as np
 import pandas as pd
@@ -8,6 +8,7 @@ import plotly.graph_objects as go
 import re
 import os
 from pathlib import Path
+import requests
 
 st.set_page_config(page_title="Painel Financeiro | JVSeps", layout="wide")
 
@@ -273,6 +274,103 @@ def mini_prop_card(proporcoes: dict, width_px=280, height_px=180, title="Propor�
         fig.update_layout(width=width_px, height=height_px, margin=dict(l=10, r=10, t=10, b=10), showlegend=True)
         st.plotly_chart(fig, config={"displayModeBar": False})
 
+# =============== SELIC (BCB SGS 1178) ===============
+@st.cache_data(ttl=21600, show_spinner=False)
+def fetch_selic_index(start_date: dt.date, end_date: dt.date) -> pd.Series:
+    """
+    SELIC diária (SGS 1178 - anualizada base 252) → índice acumulado base 100.
+    Estratégia: JSON por datas → fallback 'últimos N' → fallback CSV.
+    Converte % a.a. para fator diário: (1 + taxa_a.a.)**(1/252).
+    """
+    headers = {"User-Agent": "Mozilla/5.0 (Streamlit App)"}  # evita bloqueio
+    base = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.1178/dados"
+
+    def _to_index(rows):
+        if not rows:
+            return pd.Series(dtype="float64")
+        df = pd.DataFrame(rows)
+        if "data" not in df or "valor" not in df or df.empty:
+            return pd.Series(dtype="float64")
+        df["data"] = pd.to_datetime(df["data"], format="%d/%m/%Y", errors="coerce")
+        df["valor"] = (
+            df["valor"].astype(str)
+            .str.replace(".", "", regex=False)
+            .str.replace(",", ".", regex=False)
+        )
+        df["valor"] = pd.to_numeric(df["valor"], errors="coerce")
+        df = df.dropna(subset=["data", "valor"]).sort_values("data")
+        if df.empty:
+            return pd.Series(dtype="float64")
+        # taxa % a.a. → fator diário
+        fator_dia = (1.0 + df["valor"] / 100.0) ** (1.0 / 252.0)
+        idx = fator_dia.cumprod()
+        idx = (idx / idx.iloc[0]) * 100.0
+        idx.index = df["data"]
+        # recorte do intervalo solicitado
+        idx = idx[(idx.index.date >= start_date) & (idx.index.date <= end_date)]
+        return idx
+
+    # 1) JSON com faixa por data
+    try:
+        r = requests.get(
+            base,
+            params={
+                "formato": "json",
+                "dataInicial": start_date.strftime("%d/%m/%Y"),
+                "dataFinal": end_date.strftime("%d/%m/%Y"),
+            },
+            headers=headers,
+            timeout=20,
+        )
+        r.raise_for_status()
+        out = _to_index(r.json())
+        if not out.empty:
+            return out
+    except Exception:
+        pass
+
+    # 2) JSON 'últimos N'
+    try:
+        days = (end_date - start_date).days + 10
+        N = min(max(days, 30), 5000)
+        url2 = f"{base}/ultimos/{N}"
+        r2 = requests.get(url2, params={"formato": "json"}, headers=headers, timeout=20)
+        r2.raise_for_status()
+        out2 = _to_index(r2.json())
+        if not out2.empty:
+            return out2
+    except Exception:
+        pass
+
+    # 3) CSV como último recurso
+    try:
+        r3 = requests.get(
+            base,
+            params={
+                "formato": "csv",
+                "dataInicial": start_date.strftime("%d/%m/%Y"),
+                "dataFinal": end_date.strftime("%d/%m/%Y"),
+            },
+            headers=headers,
+            timeout=20,
+        )
+        r3.raise_for_status()
+        # parse básico do CSV (data;valor)
+        lines = [ln for ln in r3.text.splitlines() if ln.strip()]
+        if len(lines) >= 2:
+            rows = []
+            for ln in lines[1:]:
+                parts = ln.split(";")
+                if len(parts) >= 2:
+                    rows.append({"data": parts[0].strip(), "valor": parts[1].strip()})
+            out3 = _to_index(rows)
+            if not out3.empty:
+                return out3
+    except Exception:
+        pass
+
+    return pd.Series(dtype="float64")
+
 # =============== LOG da Carteira ===============
 DATA_DIR = Path(".")
 LOG_FILE = str(DATA_DIR / "carteira_log.csv")
@@ -467,7 +565,7 @@ with tab_criptos:
                 with cols[c]:
                     mini_card(sym, serie, y_label=ylab, start_date=sdate, note=note)
 
-# ----- Ativa (Carteira + IBOV + LOG LISTADO) -----
+# ----- Ativa (Carteira + LOG + Gráficos IBOV/SELIC) -----
 with tab_ativa:
     # usa valores atuais ou do registro salvo
     use_vals = {
@@ -501,8 +599,26 @@ with tab_ativa:
     col_left, col_right = st.columns([1, 1], gap="small")
 
     with col_left:
-        mini_prop_card({"VCS": use_vals["vcs_pct"], "WHS": use_vals["whs_pct"]},
-                       title="Proporção de Ativos (VCS/WHS)")
+        # cards menores
+        # Sempre usa a ÚLTIMA proporção registrada no LOG
+        _log_all = _load_log()
+        _vcs_last = float(use_vals.get("vcs_pct", 0.0))
+        _whs_last = float(use_vals.get("whs_pct", 0.0))
+        try:
+            if _log_all is not None and not _log_all.empty:
+                _log_all = _log_all.sort_values(["data", "ts"], ascending=[False, False]).reset_index(drop=True)
+                _last = _log_all.iloc[0]
+                _v = float(_last.get("vcs_pct", 0.0) or 0.0)
+                _w = float(_last.get("whs_pct", 0.0) or 0.0)
+                _tot = _v + _w
+                if _tot > 0:
+                    _vcs_last = round(_v * 100.0 / _tot, 2)
+                    _whs_last = round(100.0 - _vcs_last, 2)
+        except Exception:
+            pass
+        mini_prop_card({"VCS": _vcs_last, "WHS": _whs_last},
+                       title="Proporção de Ativos (VCS/WHS)",
+                       width_px=240, height_px=160)
 
     with col_right:
         with _container_border():
@@ -516,15 +632,7 @@ with tab_ativa:
                 st.metric("Total", brl(tot))
                 st.metric("VCS (%)", f"{use_vals['vcs_pct']:.2f}%")
 
-    st.markdown("---")
-
-    # Card IBOV
-    if ibov.empty:
-        st.info("Sem dados do IBOV/Proxy para o período.")
-    else:
-        mini_card("Índice Bovespa", ibov, y_label="Pts", start_date=since_ibov, note=ibov_note)
-
-    # ===== Listagem de LOGs (planilha) =====
+    # ===== Listagem de LOGs (planilha) — logo abaixo dos cards =====
     st.markdown("### 🗂️ Registros salvos da carteira")
     _df = _load_log()
     if _df.empty:
@@ -551,7 +659,7 @@ with tab_ativa:
         # Botões de ação sobre o LOG
         colb1, colb2, colb3 = st.columns([1,1,2], gap="small")
         with colb1:
-            if st.button("🗑️ Excluir registro selecionado"):
+            if st.button("🗑️ Excluir registro selecionado", key="btn_del_log"):
                 if sel_idx is None or _df.empty:
                     st.warning("Nenhum registro selecionado.")
                 else:
@@ -561,13 +669,86 @@ with tab_ativa:
                     do_rerun()
         with colb2:
             csv_bytes = _df.to_csv(index=False).encode("utf-8")
-            st.download_button("⬇️ Baixar CSV", data=csv_bytes, file_name="carteira_log.csv", mime="text/csv")
+            st.download_button("⬇️ Baixar CSV", data=csv_bytes, file_name="carteira_log.csv", mime="text/csv", key="btn_csv_download")
         with colb3:
-            # XLSX
             import io
             buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
-                _df.to_excel(writer, sheet_name="LogCarteira", index=False)
-            st.download_button("⬇️ Baixar XLSX", data=buf.getvalue(),
-                               file_name="carteira_log.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            wrote = False
+            try:
+                with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+                    _df.to_excel(writer, sheet_name="LogCarteira", index=False)
+                wrote = True
+            except Exception:
+                try:
+                    buf = io.BytesIO()
+                    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                        _df.to_excel(writer, sheet_name="LogCarteira", index=False)
+                    wrote = True
+                except Exception:
+                    wrote = False
+
+            if wrote:
+                st.download_button(
+                    "⬇️ Baixar XLSX",
+                    data=buf.getvalue(),
+                    file_name="carteira_log.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="btn_xlsx_download",
+                )
+            else:
+                st.warning("Não foi possível gerar XLSX (módulos ausentes). Baixe o CSV acima.")
+
+    st.markdown("---")
+
+    # ===== Gráficos de mercado (abaixo do LOG): IBOV (menor) + SELIC) =====
+    # Definição da data inicial da SELIC: LOG selecionado (se marcado) ou data do formulário de LOG
+    try:
+        selic_start = None
+        if use_saved and sel_idx is not None and not _load_log().empty:
+            _rlog = _load_log().iloc[int(sel_idx)]
+            _d = _rlog.get('data')
+            if pd.notna(_d):
+                selic_start = pd.to_datetime(_d).date()
+        if selic_start is None:
+            # log_date vem do formulário na sidebar
+            selic_start = pd.to_datetime(log_date).date() if pd.notna(pd.to_datetime(log_date, errors='coerce')) else since_ibov
+        # sanity bounds
+        if selic_start > end:
+            selic_start = end
+    except Exception:
+        selic_start = since_ibov
+
+    cols_mk1, cols_mk2 = st.columns(2, gap="small")
+
+    with cols_mk1:
+        # IBOV
+        if ibov.empty:
+            st.info("Sem dados do IBOV/Proxy para o período.")
+        else:
+            mini_card("Índice Bovespa", ibov, y_label="Pts",
+                      start_date=since_ibov, note=ibov_note,
+                      width_px=260, height_px=160)  # menor
+
+    with cols_mk2:
+        # SELIC (índice acumulado base 100), alinhada ao eixo de datas do IBOV (ffill)
+        try:
+            selic_raw = fetch_selic_index(selic_start, end)
+        except Exception as e:
+            selic_raw = pd.Series(dtype="float64")
+
+        if selic_raw.empty:
+            st.info("Não foi possível obter a SELIC para o período selecionado.")
+        else:
+            selic_idx = selic_raw
+            try:
+                if not ibov.empty:
+                    ibov_dates = ibov.index.normalize().unique().sort_values()
+                    ibov_dates = ibov_dates[(ibov_dates.date >= selic_start) & (ibov_dates.date <= end)]
+                    if len(ibov_dates) > 0:
+                        selic_idx = selic_raw.reindex(ibov_dates, method="ffill")
+            except Exception:
+                pass
+
+            mini_card("SELIC (índice base 100)", selic_idx, y_label="Índice",
+                      start_date=selic_start, note="Fonte: BCB/SGS 1178 (SELIC diária, anualizada base 252)",
+                      width_px=260, height_px=160)  # menor
