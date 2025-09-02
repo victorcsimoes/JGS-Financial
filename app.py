@@ -25,13 +25,22 @@ def do_rerun():
 def fmt_br(d):
     if not d:
         return "—"
-    return dt.datetime.strptime(str(d), "%Y-%m-%d").strftime("%d/%m/%y")
+    try:
+        # aceita date, datetime ou string YYYY-MM-DD
+        if isinstance(d, (dt.date, dt.datetime)):
+            return pd.to_datetime(d).strftime("%d/%m/%y")
+        return dt.datetime.strptime(str(d), "%Y-%m-%d").strftime("%d/%m/%y")
+    except Exception:
+        return str(d)
 
 def brl(x):
     try:
-        return f"R$ {float(x):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        v = float(x)
+        if not np.isfinite(v):
+            v = 0.0
+        return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except Exception:
-        return "—"
+        return "R$ 0,00"
 
 def parse_brl_text(txt: str) -> float:
     if txt is None:
@@ -277,12 +286,7 @@ def mini_prop_card(proporcoes: dict, width_px=280, height_px=180, title="Propor�
 # =============== SELIC (BCB SGS 1178) ===============
 @st.cache_data(ttl=21600, show_spinner=False)
 def fetch_selic_index(start_date: dt.date, end_date: dt.date) -> pd.Series:
-    """
-    SELIC diária (SGS 1178 - anualizada base 252) → índice acumulado base 100.
-    Estratégia: JSON por datas → fallback 'últimos N' → fallback CSV.
-    Converte % a.a. para fator diário: (1 + taxa_a.a.)**(1/252).
-    """
-    headers = {"User-Agent": "Mozilla/5.0 (Streamlit App)"}  # evita bloqueio
+    headers = {"User-Agent": "Mozilla/5.0 (Streamlit App)"}
     base = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.1178/dados"
 
     def _to_index(rows):
@@ -301,23 +305,20 @@ def fetch_selic_index(start_date: dt.date, end_date: dt.date) -> pd.Series:
         df = df.dropna(subset=["data", "valor"]).sort_values("data")
         if df.empty:
             return pd.Series(dtype="float64")
-        # taxa % a.a. → fator diário
         fator_dia = (1.0 + df["valor"] / 100.0) ** (1.0 / 252.0)
         idx = fator_dia.cumprod()
         idx = (idx / idx.iloc[0]) * 100.0
         idx.index = df["data"]
-        # recorte do intervalo solicitado
         idx = idx[(idx.index.date >= start_date) & (idx.index.date <= end_date)]
         return idx
 
-    # 1) JSON com faixa por data
     try:
         r = requests.get(
             base,
             params={
                 "formato": "json",
-                "dataInicial": start_date.strftime("%d/%m/%Y"),
-                "dataFinal": end_date.strftime("%d/%m/%Y"),
+                "dataInicial": pd.to_datetime(start_date).strftime("%d/%m/%Y"),
+                "dataFinal":   pd.to_datetime(end_date).strftime("%d/%m/%Y"),
             },
             headers=headers,
             timeout=20,
@@ -329,7 +330,6 @@ def fetch_selic_index(start_date: dt.date, end_date: dt.date) -> pd.Series:
     except Exception:
         pass
 
-    # 2) JSON 'últimos N'
     try:
         days = (end_date - start_date).days + 10
         N = min(max(days, 30), 5000)
@@ -342,20 +342,18 @@ def fetch_selic_index(start_date: dt.date, end_date: dt.date) -> pd.Series:
     except Exception:
         pass
 
-    # 3) CSV como último recurso
     try:
         r3 = requests.get(
             base,
             params={
                 "formato": "csv",
-                "dataInicial": start_date.strftime("%d/%m/%Y"),
-                "dataFinal": end_date.strftime("%d/%m/%Y"),
+                "dataInicial": pd.to_datetime(start_date).strftime("%d/%m/%Y"),
+                "dataFinal":   pd.to_datetime(end_date).strftime("%d/%m/%Y"),
             },
             headers=headers,
             timeout=20,
         )
         r3.raise_for_status()
-        # parse básico do CSV (data;valor)
         lines = [ln for ln in r3.text.splitlines() if ln.strip()]
         if len(lines) >= 2:
             rows = []
@@ -389,8 +387,13 @@ def _load_log() -> pd.DataFrame:
     for c in LOG_COLS:
         if c not in df.columns:
             df[c] = np.nan
+    # normaliza tipos
     df["data"] = pd.to_datetime(df["data"], errors="coerce").dt.date
     df["ts"]   = pd.to_datetime(df["ts"], errors="coerce")
+    for c in ["vcs_valor","whs_valor","vcs_pct","whs_pct"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["auto"] = df["auto"].astype("boolean")
+    df["descricao"] = df["descricao"].astype("string")
     return df[LOG_COLS].copy()
 
 def _save_log(df: pd.DataFrame):
@@ -403,6 +406,13 @@ def _save_log(df: pd.DataFrame):
         return True
     except Exception:
         return False
+
+def _get_last_log():
+    df = _load_log()
+    if df is None or df.empty:
+        return None
+    df = df.sort_values(["data", "ts"], ascending=[False, False]).reset_index(drop=True)
+    return df.iloc[0]
 
 # =============== Sidebar (controles) ===============
 show_marquee = st.sidebar.checkbox("Mostrar faixa de índices no topo", value=True)
@@ -431,63 +441,95 @@ st.sidebar.markdown("### Ativa (IBOV)")
 since_ibov = st.sidebar.date_input("IBOV desde", value=default_since, max_value=today, key="ibov_since")
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("### Carteira (Ativa)")
-auto_pct = st.sidebar.checkbox("Calcular proporção automaticamente pelos valores", value=True)
 
-valor_vcs_str = st.sidebar.text_input("Valor VCS (R$)", value="0,00", help="Ex.: 50.000,50")
-valor_whs_str = st.sidebar.text_input("Valor WHS (R$)", value="0,00", help="Ex.: 1.000,00")
-valor_vcs = parse_brl_text(valor_vcs_str)
-valor_whs = parse_brl_text(valor_whs_str)
-valor_total = float(valor_vcs) + float(valor_whs)
+# ***** Navegação (no corpo, mas controla visibilidade do menu da Carteira) *****
+if "active_tab" not in st.session_state:
+    st.session_state.active_tab = "📈 Criptos"
+active_tab = st.radio("Navegação", ["📈 Criptos", "📊 Ativa"], index=(0 if st.session_state.active_tab=="📈 Criptos" else 1), horizontal=True)
+st.session_state.active_tab = active_tab
 
-if auto_pct:
-    vcs_pct = round((valor_vcs / valor_total) * 100.0, 2) if valor_total > 0 else 0.0
-    whs_pct = round(100.0 - vcs_pct, 2)
-    st.sidebar.markdown(f"**VCS (%)**: {vcs_pct:.2f}%  \n**WHS (%)**: {whs_pct:.2f}%")
-else:
-    vcs_pct = st.sidebar.number_input("Proporção VCS (%)", min_value=0.0, max_value=100.0, value=18.91, step=0.01)
-    whs_pct = round(100.0 - float(vcs_pct), 2)
-    st.sidebar.markdown(f"**WHS (%)**: {whs_pct:.2f}%")
+# ===== Placeholder defaults (caso aba Ativa não esteja ativa ainda) =====
+auto_pct = True
+valor_vcs = 0.0
+valor_whs = 0.0
+vcs_pct = 0.0
+whs_pct = 100.0
+log_date = today
+log_desc = ""
+sel_idx = None
+use_saved = False
 
-# ---- Log (salvar/selecionar) ----
-st.sidebar.markdown("#### Registro da carteira")
-log_date = st.sidebar.date_input("Data do registro", value=today, max_value=today, key="carteira_data")
-log_desc = st.sidebar.text_input("Descrição/nota (opcional)", value="")
+# Mostra Carteira/Registro no sidebar SOMENTE quando a aba Ativa está ativa
+if active_tab == "📊 Ativa":
+    last = _get_last_log()
+    last_vcs_valor = float(last["vcs_valor"]) if last is not None and pd.notna(last.get("vcs_valor")) else 0.0
+    last_whs_valor = float(last["whs_valor"]) if last is not None and pd.notna(last.get("whs_valor")) else 0.0
+    last_vcs_pct   = float(last["vcs_pct"])   if last is not None and pd.notna(last.get("vcs_pct"))   else 0.0
+    last_whs_pct   = float(last["whs_pct"])   if last is not None and pd.notna(last.get("whs_pct"))   else 100.0
+    last_date      = pd.to_datetime(last["data"]).date() if last is not None and pd.notna(last.get("data")) else today
+    last_desc      = str(last.get("descricao") or "") if last is not None else ""
 
-if st.sidebar.button("💾 Salvar registro", use_container_width=True):
-    try:
-        df_log = _load_log()
-        new_row = {
-            "data": log_date,
-            "vcs_valor": round(float(valor_vcs), 2),
-            "whs_valor": round(float(valor_whs), 2),
-            "vcs_pct": round(float(vcs_pct), 2),
-            "whs_pct": round(float(whs_pct), 2),
-            "auto": bool(auto_pct),
-            "descricao": log_desc,
-            "ts": dt.datetime.now(),
-        }
-        df_log = pd.concat([df_log, pd.DataFrame([new_row])], ignore_index=True)
-        _save_log(df_log)
-        st.sidebar.success("Registro salvo!")
-    except Exception as e:
-        st.sidebar.error(f"Falha ao salvar registro: {e}")
+    st.sidebar.markdown("### Carteira (Ativa)")
+    auto_pct = st.sidebar.checkbox("Calcular proporção automaticamente pelos valores", value=True, key="auto_pct")
+    valor_vcs_str = st.sidebar.text_input("Valor VCS (R$)", value=brl(last_vcs_valor) if last is not None else "R$ 0,00", help="Ex.: 50.000,50", key="vcs_valor_txt")
+    valor_whs_str = st.sidebar.text_input("Valor WHS (R$)", value=brl(last_whs_valor) if last is not None else "R$ 0,00", help="Ex.: 1.000,00", key="whs_valor_txt")
+    valor_vcs = parse_brl_text(valor_vcs_str)
+    valor_whs = parse_brl_text(valor_whs_str)
+    valor_total = float(valor_vcs) + float(valor_whs)
+    if auto_pct:
+        if valor_total > 0:
+            vcs_pct = round((valor_vcs / valor_total) * 100.0, 2)
+            whs_pct = round(100.0 - vcs_pct, 2)
+        else:
+            # sem valores digitados → usa última proporção registrada
+            vcs_pct = last_vcs_pct
+            whs_pct = last_whs_pct
+        st.sidebar.markdown(f"**VCS (%)**: {vcs_pct:.2f}%  \n**WHS (%)**: {whs_pct:.2f}%")
+    else:
+        # inicia com a última proporção
+        vcs_pct = st.sidebar.number_input("Proporção VCS (%)", min_value=0.0, max_value=100.0, value=float(last_vcs_pct), step=0.01, key="vcs_pct_num")
+        whs_pct = round(100.0 - float(vcs_pct), 2)
+        st.sidebar.markdown(f"**WHS (%)**: {whs_pct:.2f}%")
 
-df_log = _load_log()
-if not df_log.empty:
-    df_log = df_log.sort_values(["data", "ts"], ascending=[False, False]).reset_index(drop=True)
-    def _fmt_row(i):
-        r = df_log.iloc[i]
-        tot = (float(r.get("vcs_valor", 0)) + float(r.get("whs_valor", 0)))
-        dstr = fmt_br(r["data"])
-        desc = str(r["descricao"]) if isinstance(r["descricao"], str) else ""
-        return f"{dstr} — VCS {float(r['vcs_pct']):.2f}% | Total {brl(tot)}" + (f" — {desc}" if desc else "")
-    sel_idx = st.sidebar.selectbox("Selecionar registro salvo", list(range(len(df_log))), index=0, format_func=_fmt_row)
-    use_saved = st.sidebar.checkbox("Usar registro salvo no gráfico", value=False)
-else:
-    sel_idx = None
-    use_saved = False
-    st.sidebar.info("Nenhum registro salvo ainda.")
+    # ---- Log (salvar/selecionar) ----
+    st.sidebar.markdown("#### Registro da carteira")
+    log_date = st.sidebar.date_input("Data do registro", value=last_date, max_value=today, key="carteira_data")
+    log_desc = st.sidebar.text_input("Descrição/nota (opcional)", value=last_desc, key="carteira_desc")
+
+    if st.sidebar.button("💾 Salvar registro", use_container_width=True, key="save_log_btn"):
+        try:
+            df_log = _load_log()
+            new_row = {
+                "data": log_date,
+                "vcs_valor": round(float(valor_vcs), 2),
+                "whs_valor": round(float(valor_whs), 2),
+                "vcs_pct": round(float(vcs_pct), 2),
+                "whs_pct": round(float(whs_pct), 2),
+                "auto": bool(auto_pct),
+                "descricao": log_desc,
+                "ts": dt.datetime.now(),
+            }
+            df_log = pd.concat([df_log, pd.DataFrame([new_row])], ignore_index=True)
+            _save_log(df_log)
+            st.sidebar.success("Registro salvo!")
+        except Exception as e:
+            st.sidebar.error(f"Falha ao salvar registro: {e}")
+
+    df_log = _load_log()
+    if not df_log.empty:
+        df_log = df_log.sort_values(["data", "ts"], ascending=[False, False]).reset_index(drop=True)
+        def _fmt_row(i):
+            r = df_log.iloc[i]
+            tot = (float(r.get("vcs_valor", 0)) + float(r.get("whs_valor", 0)))
+            dstr = fmt_br(r["data"])
+            desc = str(r["descricao"]) if isinstance(r["descricao"], str) else ""
+            return f"{dstr} — VCS {float(r['vcs_pct']):.2f}% | Total {brl(tot)}" + (f" — {desc}" if desc else "")
+        sel_idx = st.sidebar.selectbox("Selecionar registro salvo", list(range(len(df_log))), index=0, format_func=_fmt_row, key="sel_log_idx")
+        use_saved = st.sidebar.checkbox("Usar registro salvo no gráfico", value=True, key="use_saved_chk")
+    else:
+        sel_idx = None
+        use_saved = False
+        st.sidebar.info("Nenhum registro salvo ainda.")
 
 # =============== Topo ===============
 if show_marquee:
@@ -545,10 +587,8 @@ st.caption(
     f"Ativa: IBOV {br_ibv}{src_note}"
 )
 
-tab_criptos, tab_ativa = st.tabs(["📈 Criptos", "📊 Ativa"])
-
-# ----- Criptos -----
-with tab_criptos:
+# ***** Navegação de conteúdo *****
+if active_tab == "📈 Criptos":
     if not assets:
         st.info("Nenhuma cripto selecionada ou sem dados para o período.")
     else:
@@ -565,15 +605,23 @@ with tab_criptos:
                 with cols[c]:
                     mini_card(sym, serie, y_label=ylab, start_date=sdate, note=note)
 
-# ----- Ativa (Carteira + LOG + Gráficos IBOV/SELIC) -----
-with tab_ativa:
-    # usa valores atuais ou do registro salvo
-    use_vals = {
-        "vcs_pct": float(vcs_pct), "whs_pct": float(100.0 - float(vcs_pct)),
-        "vcs_valor": float(valor_vcs), "whs_valor": float(valor_whs),
-        "origem": "atual"
+else:  # 📊 Ativa
+    # usa por padrão o último registro salvo
+    base_vals = _get_last_log()
+    default_from_log = {
+        "vcs_pct": float(base_vals["vcs_pct"]) if base_vals is not None and pd.notna(base_vals.get("vcs_pct")) else 0.0,
+        "whs_pct": float(base_vals["whs_pct"]) if base_vals is not None and pd.notna(base_vals.get("whs_pct")) else 100.0,
+        "vcs_valor": float(base_vals["vcs_valor"]) if base_vals is not None and pd.notna(base_vals.get("vcs_valor")) else 0.0,
+        "whs_valor": float(base_vals["whs_valor"]) if base_vals is not None and pd.notna(base_vals.get("whs_valor")) else 0.0,
     }
-    registro_info = ""
+    use_vals = {
+        "vcs_pct": default_from_log["vcs_pct"],
+        "whs_pct": default_from_log["whs_pct"],
+        "vcs_valor": default_from_log["vcs_valor"],
+        "whs_valor": default_from_log["whs_valor"],
+        "origem": "log(padrão)"
+    }
+    # Se usuário selecionar outro registro e marcar "usar registro", troca
     if use_saved and sel_idx is not None and not _load_log().empty:
         r = _load_log().iloc[int(sel_idx)]
         use_vals = {
@@ -583,11 +631,9 @@ with tab_ativa:
             "whs_valor": float(r["whs_valor"] or 0.0),
             "origem": "registro"
         }
-        registro_info = f"Usando registro de {fmt_br(r['data'])}" + (f" — {r['descricao']}" if isinstance(r['descricao'], str) and r['descricao'] else "")
 
     st.markdown("### 💼 Carteira (Ativa)")
-    if registro_info:
-        st.caption(registro_info)
+    st.caption(f"Valores baseados em {use_vals['origem']}.")
 
     # normaliza soma 100
     total_pct = use_vals["vcs_pct"] + use_vals["whs_pct"]
@@ -599,8 +645,7 @@ with tab_ativa:
     col_left, col_right = st.columns([1, 1], gap="small")
 
     with col_left:
-        # cards menores
-        # Sempre usa a ÚLTIMA proporção registrada no LOG
+        # Pizza sempre usando o último log
         _log_all = _load_log()
         _vcs_last = float(use_vals.get("vcs_pct", 0.0))
         _whs_last = float(use_vals.get("whs_pct", 0.0))
@@ -632,7 +677,7 @@ with tab_ativa:
                 st.metric("Total", brl(tot))
                 st.metric("VCS (%)", f"{use_vals['vcs_pct']:.2f}%")
 
-    # ===== Listagem de LOGs (planilha) — logo abaixo dos cards =====
+    # ===== Listagem de LOGs =====
     st.markdown("### 🗂️ Registros salvos da carteira")
     _df = _load_log()
     if _df.empty:
@@ -656,7 +701,6 @@ with tab_ativa:
 
         st.dataframe(df_show, use_container_width=True, hide_index=True)
 
-        # Botões de ação sobre o LOG
         colb1, colb2, colb3 = st.columns([1,1,2], gap="small")
         with colb1:
             if st.button("🗑️ Excluir registro selecionado", key="btn_del_log"):
@@ -700,8 +744,7 @@ with tab_ativa:
 
     st.markdown("---")
 
-    # ===== Gráficos de mercado (abaixo do LOG): IBOV (menor) + SELIC) =====
-    # Definição da data inicial da SELIC: LOG selecionado (se marcado) ou data do formulário de LOG
+    # ===== Gráficos IBOV + SELIC =====
     try:
         selic_start = None
         if use_saved and sel_idx is not None and not _load_log().empty:
@@ -710,9 +753,7 @@ with tab_ativa:
             if pd.notna(_d):
                 selic_start = pd.to_datetime(_d).date()
         if selic_start is None:
-            # log_date vem do formulário na sidebar
             selic_start = pd.to_datetime(log_date).date() if pd.notna(pd.to_datetime(log_date, errors='coerce')) else since_ibov
-        # sanity bounds
         if selic_start > end:
             selic_start = end
     except Exception:
@@ -721,19 +762,17 @@ with tab_ativa:
     cols_mk1, cols_mk2 = st.columns(2, gap="small")
 
     with cols_mk1:
-        # IBOV
         if ibov.empty:
             st.info("Sem dados do IBOV/Proxy para o período.")
         else:
             mini_card("Índice Bovespa", ibov, y_label="Pts",
                       start_date=since_ibov, note=ibov_note,
-                      width_px=260, height_px=160)  # menor
+                      width_px=260, height_px=160)
 
     with cols_mk2:
-        # SELIC (índice acumulado base 100), alinhada ao eixo de datas do IBOV (ffill)
         try:
             selic_raw = fetch_selic_index(selic_start, end)
-        except Exception as e:
+        except Exception:
             selic_raw = pd.Series(dtype="float64")
 
         if selic_raw.empty:
@@ -751,4 +790,4 @@ with tab_ativa:
 
             mini_card("SELIC (índice base 100)", selic_idx, y_label="Índice",
                       start_date=selic_start, note="Fonte: BCB/SGS 1178 (SELIC diária, anualizada base 252)",
-                      width_px=260, height_px=160)  # menor
+                      width_px=260, height_px=160)
