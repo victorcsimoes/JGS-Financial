@@ -1,4 +1,4 @@
-# app.py — Painel Financeiro | JVSeps (robusto: log da carteira + gráficos imunes a falhas)
+# app.py — Painel Financeiro | JVSeps (log listado na aba Ativa + excluir/baixar)
 import datetime as dt
 import numpy as np
 import pandas as pd
@@ -33,7 +33,6 @@ def brl(x):
         return "—"
 
 def parse_brl_text(txt: str) -> float:
-    """Converte 'R$ 1.234,56' / '1234,56' / '1234.56' em float."""
     if txt is None:
         return 0.0
     s = str(txt).strip()
@@ -177,7 +176,6 @@ def _clamp_start_for_interval(start: dt.date, end: dt.date, interval: str) -> dt
 
 def fetch_series_resilient(ticker: str, start_date: dt.date, end_date: dt.date, interval: str) -> pd.Series:
     start_date = _clamp_start_for_interval(start_date, end_date, interval)
-    # 1) history()
     try:
         t = yf.Ticker(ticker)
         df = t.history(start=start_date, end=end_date + dt.timedelta(days=1), interval=interval, auto_adjust=True)
@@ -187,7 +185,6 @@ def fetch_series_resilient(ticker: str, start_date: dt.date, end_date: dt.date, 
             return s
     except Exception:
         pass
-    # 2) download()
     try:
         df = yf.download(
             tickers=ticker, start=start_date, end=end_date + dt.timedelta(days=1),
@@ -199,7 +196,6 @@ def fetch_series_resilient(ticker: str, start_date: dt.date, end_date: dt.date, 
             return s
     except Exception:
         pass
-    # 3) fallback diário
     if interval != "1d":
         for _int in ["1d"]:
             try:
@@ -283,7 +279,6 @@ LOG_FILE = str(DATA_DIR / "carteira_log.csv")
 LOG_COLS = ["data", "vcs_valor", "whs_valor", "vcs_pct", "whs_pct", "auto", "descricao", "ts"]
 
 def _load_log() -> pd.DataFrame:
-    # Prioriza sessão (caso escrita em disco falhe)
     if "log_df" in st.session_state and isinstance(st.session_state.log_df, pd.DataFrame):
         df = st.session_state.log_df.copy()
     elif os.path.exists(LOG_FILE):
@@ -293,8 +288,6 @@ def _load_log() -> pd.DataFrame:
             df = pd.DataFrame(columns=LOG_COLS)
     else:
         df = pd.DataFrame(columns=LOG_COLS)
-
-    # normaliza colunas
     for c in LOG_COLS:
         if c not in df.columns:
             df[c] = np.nan
@@ -303,7 +296,6 @@ def _load_log() -> pd.DataFrame:
     return df[LOG_COLS].copy()
 
 def _save_log(df: pd.DataFrame):
-    # guarda em sessão sempre
     st.session_state.log_df = df.copy()
     try:
         out = df.copy()
@@ -311,9 +303,7 @@ def _save_log(df: pd.DataFrame):
         out["ts"]   = pd.to_datetime(out["ts"],   errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
         out.to_csv(LOG_FILE, index=False, encoding="utf-8")
         return True
-    except Exception as e:
-        # sem crash — apenas avisa
-        st.sidebar.warning(f"Não foi possível salvar no arquivo (mantido em memória). Detalhe: {e}")
+    except Exception:
         return False
 
 # =============== Sidebar (controles) ===============
@@ -383,7 +373,7 @@ if st.sidebar.button("💾 Salvar registro", use_container_width=True):
         _save_log(df_log)
         st.sidebar.success("Registro salvo!")
     except Exception as e:
-        st.sidebar.error(f"Falha ao salvar registro (mas o app segue): {e}")
+        st.sidebar.error(f"Falha ao salvar registro: {e}")
 
 df_log = _load_log()
 if not df_log.empty:
@@ -420,10 +410,9 @@ for sym in ["BTC-USD", "ETH-USD", "SOL-USD"]:
                 s, note = preserve_last_when_empty(sym, end)
             assets[sym] = (s, start, note)
         except Exception as e:
-            # não travar a página
             st.warning(f"Falha ao carregar {sym}: {e}")
 
-# IBOV (com fallbacks)
+# IBOV + fallbacks
 ibov_used = None
 ibov_note = None
 ibov = pd.Series(dtype="float64")
@@ -438,7 +427,7 @@ for candidate in ["^BVSP", "^IBOV", "BOVA11.SA"]:
             ibov_used = candidate
             ibov_note = note_try
             break
-    except Exception as e:
+    except Exception:
         continue
 if ibov_used and ibov_used != "^BVSP":
     extra = "IBOV (alt)" if ibov_used == "^IBOV" else "BOVA11 (proxy)"
@@ -462,82 +451,123 @@ tab_criptos, tab_ativa = st.tabs(["📈 Criptos", "📊 Ativa"])
 
 # ----- Criptos -----
 with tab_criptos:
-    try:
-        if not assets:
-            st.info("Nenhuma cripto selecionada ou sem dados para o período.")
-        else:
-            cards = []
-            for sym in ["BTC-USD", "ETH-USD", "SOL-USD"]:
-                if sym in assets:
-                    s, sdate, note = assets[sym]
-                    cards.append((sym, s, "USD", sdate, note))
-            for i in range(0, len(cards), 4):
-                cols = st.columns(4, gap="small")
-                for c in range(4):
-                    if i + c >= len(cards): break
-                    sym, serie, ylab, sdate, note = cards[i + c]
-                    with cols[c]:
-                        mini_card(sym, serie, y_label=ylab, start_date=sdate, note=note)
-    except Exception as e:
-        st.error(f"Erro ao renderizar Criptos: {e}")
+    if not assets:
+        st.info("Nenhuma cripto selecionada ou sem dados para o período.")
+    else:
+        cards = []
+        for sym in ["BTC-USD", "ETH-USD", "SOL-USD"]:
+            if sym in assets:
+                s, sdate, note = assets[sym]
+                cards.append((sym, s, "USD", sdate, note))
+        for i in range(0, len(cards), 4):
+            cols = st.columns(4, gap="small")
+            for c in range(4):
+                if i + c >= len(cards): break
+                sym, serie, ylab, sdate, note = cards[i + c]
+                with cols[c]:
+                    mini_card(sym, serie, y_label=ylab, start_date=sdate, note=note)
 
-# ----- Ativa (Carteira + IBOV) -----
+# ----- Ativa (Carteira + IBOV + LOG LISTADO) -----
 with tab_ativa:
-    try:
-        # usa valores atuais, ou o registro salvo (se marcado)
+    # usa valores atuais ou do registro salvo
+    use_vals = {
+        "vcs_pct": float(vcs_pct), "whs_pct": float(100.0 - float(vcs_pct)),
+        "vcs_valor": float(valor_vcs), "whs_valor": float(valor_whs),
+        "origem": "atual"
+    }
+    registro_info = ""
+    if use_saved and sel_idx is not None and not _load_log().empty:
+        r = _load_log().iloc[int(sel_idx)]
         use_vals = {
-            "vcs_pct": float(vcs_pct), "whs_pct": float(100.0 - float(vcs_pct)),
-            "vcs_valor": float(valor_vcs), "whs_valor": float(valor_whs),
-            "origem": "atual"
+            "vcs_pct": float(r["vcs_pct"] or 0.0),
+            "whs_pct": float(r["whs_pct"] or 0.0),
+            "vcs_valor": float(r["vcs_valor"] or 0.0),
+            "whs_valor": float(r["whs_valor"] or 0.0),
+            "origem": "registro"
         }
-        registro_info = ""
-        if use_saved and sel_idx is not None and not _load_log().empty:
-            r = _load_log().iloc[int(sel_idx)]
-            use_vals = {
-                "vcs_pct": float(r["vcs_pct"] or 0.0),
-                "whs_pct": float(r["whs_pct"] or 0.0),
-                "vcs_valor": float(r["vcs_valor"] or 0.0),
-                "whs_valor": float(r["whs_valor"] or 0.0),
-                "origem": "registro"
-            }
-            registro_info = f"Usando registro de {fmt_br(r['data'])}" + (f" — {r['descricao']}" if isinstance(r['descricao'], str) and r['descricao'] else "")
+        registro_info = f"Usando registro de {fmt_br(r['data'])}" + (f" — {r['descricao']}" if isinstance(r['descricao'], str) and r['descricao'] else "")
 
-        st.markdown("### 💼 Carteira (Ativa)")
-        if registro_info:
-            st.caption(registro_info)
+    st.markdown("### 💼 Carteira (Ativa)")
+    if registro_info:
+        st.caption(registro_info)
 
-        # normaliza soma 100
-        total_pct = use_vals["vcs_pct"] + use_vals["whs_pct"]
-        if total_pct > 0 and abs(total_pct - 100.0) > 0.01:
-            p = use_vals["vcs_pct"] * 100.0 / total_pct
-            use_vals["vcs_pct"] = round(p, 2)
-            use_vals["whs_pct"] = round(100.0 - p, 2)
+    # normaliza soma 100
+    total_pct = use_vals["vcs_pct"] + use_vals["whs_pct"]
+    if total_pct > 0 and abs(total_pct - 100.0) > 0.01:
+        p = use_vals["vcs_pct"] * 100.0 / total_pct
+        use_vals["vcs_pct"] = round(p, 2)
+        use_vals["whs_pct"] = round(100.0 - p, 2)
 
-        col_left, col_right = st.columns([1, 1], gap="small")
+    col_left, col_right = st.columns([1, 1], gap="small")
 
-        with col_left:
-            mini_prop_card({"VCS": use_vals["vcs_pct"], "WHS": use_vals["whs_pct"]},
-                           title="Proporção de Ativos (VCS/WHS)")
+    with col_left:
+        mini_prop_card({"VCS": use_vals["vcs_pct"], "WHS": use_vals["whs_pct"]},
+                       title="Proporção de Ativos (VCS/WHS)")
 
-        with col_right:
-            with _container_border():
-                st.markdown("#### Valores da Carteira")
-                c1, c2 = st.columns(2, gap="small")
-                tot = float(use_vals["vcs_valor"]) + float(use_vals["whs_valor"])
-                with c1:
-                    st.metric("VCS", brl(use_vals["vcs_valor"]))
-                    st.metric("WHS", brl(use_vals["whs_valor"]))
-                with c2:
-                    st.metric("Total", brl(tot))
-                    st.metric("VCS (%)", f"{use_vals['vcs_pct']:.2f}%")
+    with col_right:
+        with _container_border():
+            st.markdown("#### Valores da Carteira")
+            c1, c2 = st.columns(2, gap="small")
+            tot = float(use_vals["vcs_valor"]) + float(use_vals["whs_valor"])
+            with c1:
+                st.metric("VCS", brl(use_vals["vcs_valor"]))
+                st.metric("WHS", brl(use_vals["whs_valor"]))
+            with c2:
+                st.metric("Total", brl(tot))
+                st.metric("VCS (%)", f"{use_vals['vcs_pct']:.2f}%")
 
-        st.markdown("---")
+    st.markdown("---")
 
-        # IBOV
-        if ibov.empty:
-            st.info("Sem dados do IBOV/Proxy para o período.")
-        else:
-            mini_card("Índice Bovespa", ibov, y_label="Pts", start_date=since_ibov, note=ibov_note)
+    # Card IBOV
+    if ibov.empty:
+        st.info("Sem dados do IBOV/Proxy para o período.")
+    else:
+        mini_card("Índice Bovespa", ibov, y_label="Pts", start_date=since_ibov, note=ibov_note)
 
-    except Exception as e:
-        st.error(f"Erro ao renderizar a aba Ativa: {e}")
+    # ===== Listagem de LOGs (planilha) =====
+    st.markdown("### 🗂️ Registros salvos da carteira")
+    _df = _load_log()
+    if _df.empty:
+        st.info("Nenhum registro salvo até o momento.")
+    else:
+        df_show = _df.copy()
+        df_show["Data"] = pd.to_datetime(df_show["data"], errors="coerce").dt.strftime("%d/%m/%y")
+        df_show["Total"] = (pd.to_numeric(df_show["vcs_valor"], errors="coerce").fillna(0.0) +
+                            pd.to_numeric(df_show["whs_valor"], errors="coerce").fillna(0.0))
+        df_show["VCS (R$)"] = df_show["vcs_valor"].apply(brl)
+        df_show["WHS (R$)"] = df_show["whs_valor"].apply(brl)
+        df_show["Total (R$)"] = df_show["Total"].apply(brl)
+        df_show["VCS (%)"] = df_show["vcs_pct"].map(lambda x: f"{float(x):.2f}%")
+        df_show["WHS (%)"] = df_show["whs_pct"].map(lambda x: f"{float(x):.2f}%")
+        df_show["Auto?"] = df_show["auto"].map(lambda x: "Sim" if bool(x) else "Não")
+        df_show["Criado em"] = pd.to_datetime(df_show["ts"], errors="coerce").dt.strftime("%d/%m/%y %H:%M")
+
+        cols_order = ["Data", "Descrição", "VCS (R$)", "WHS (R$)", "Total (R$)", "VCS (%)", "WHS (%)", "Auto?", "Criado em"]
+        df_show.rename(columns={"descricao": "Descrição"}, inplace=True)
+        df_show = df_show[cols_order]
+
+        st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+        # Botões de ação sobre o LOG
+        colb1, colb2, colb3 = st.columns([1,1,2], gap="small")
+        with colb1:
+            if st.button("🗑️ Excluir registro selecionado"):
+                if sel_idx is None or _df.empty:
+                    st.warning("Nenhum registro selecionado.")
+                else:
+                    df_new = _df.drop(_df.index[int(sel_idx)]).reset_index(drop=True)
+                    _save_log(df_new)
+                    st.success("Registro excluído.")
+                    do_rerun()
+        with colb2:
+            csv_bytes = _df.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Baixar CSV", data=csv_bytes, file_name="carteira_log.csv", mime="text/csv")
+        with colb3:
+            # XLSX
+            import io
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+                _df.to_excel(writer, sheet_name="LogCarteira", index=False)
+            st.download_button("⬇️ Baixar XLSX", data=buf.getvalue(),
+                               file_name="carteira_log.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
