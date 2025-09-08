@@ -1,793 +1,776 @@
-# app.py — Painel Financeiro | JVSeps (IBOV + SELIC + LOG com excluir/baixar)
-import datetime as dt
-import numpy as np
-import pandas as pd
-import yfinance as yf
-import streamlit as st
-import plotly.graph_objects as go
-import re
+# app.py — FinApp Pequenas Empresas (guias completas + usuários por conta + escopo por conta/setor + anexos + exportação)
+# Requisitos: streamlit, pandas, openpyxl
+# Execução: streamlit run app.py
+
 import os
-from pathlib import Path
-import requests
+import hashlib
+import sqlite3
+from io import StringIO, BytesIO
+from datetime import date, datetime
 
-st.set_page_config(page_title="Painel Financeiro | JVSeps", layout="wide")
+import pandas as pd
+import streamlit as st
 
-# =============== Utils básicos ===============
-def do_rerun():
-    try:
-        st.rerun()
-    except Exception:
-        try:
-            st.experimental_rerun()
-        except Exception:
-            pass
+DB_PATH = "finapp.db"
+ATTACH_DIR = "attachments"
 
-def fmt_br(d):
-    if not d:
-        return "—"
-    try:
-        # aceita date, datetime ou string YYYY-MM-DD
-        if isinstance(d, (dt.date, dt.datetime)):
-            return pd.to_datetime(d).strftime("%d/%m/%y")
-        return dt.datetime.strptime(str(d), "%Y-%m-%d").strftime("%d/%m/%y")
-    except Exception:
-        return str(d)
+st.set_page_config(page_title="FinApp | Pequenas Empresas", layout="wide")
 
-def brl(x):
-    try:
-        v = float(x)
-        if not np.isfinite(v):
-            v = 0.0
-        return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except Exception:
-        return "R$ 0,00"
+# ---------------------- Utils & DB ----------------------
+@st.cache_resource
+def get_conn():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    return conn
 
-def parse_brl_text(txt: str) -> float:
-    if txt is None:
-        return 0.0
-    s = str(txt).strip()
-    if not s:
-        return 0.0
-    s = s.replace("R$", "").replace("r$", "").strip()
-    if "," in s and "." in s:
-        s = s.replace(".", "").replace(",", ".")
-    elif "," in s:
-        s = s.replace(",", ".")
-    s = re.sub(r"[^0-9\.\-]", "", s)
-    try:
-        return float(s)
-    except Exception:
-        return 0.0
+def hash_password(pwd: str) -> str:
+    return hashlib.sha256(pwd.encode("utf-8")).hexdigest()
 
-# =============== Login simples ===============
-if "auth_ok" not in st.session_state:
-    st.session_state.auth_ok = False
+def init_db():
+    os.makedirs(ATTACH_DIR, exist_ok=True)
+    conn = get_conn()
+    cur = conn.cursor()
 
-def login_ui():
-    st.title("🔐 Acesso restrito")
-    with st.form("login_form", clear_on_submit=False):
-        u = st.text_input("Usuário")
-        p = st.text_input("Senha", type="password")
-        ok = st.form_submit_button("Entrar", use_container_width=True)
-    if ok:
-        if u.strip() == "jvseps" and p == "162023":
-            st.session_state.auth_ok = True
-            st.success("Autenticado!")
-            do_rerun()
-        else:
-            st.error("Usuário ou senha inválidos.")
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
+        """
+    )
 
-if not st.session_state.auth_ok:
-    login_ui()
-    st.stop()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            type TEXT CHECK(type IN ('bank','cash','card')) NOT NULL,
+            institution TEXT,
+            number TEXT
+        );
+        """
+    )
 
-# =============== Faixa de índices ===============
-ECON_TICKERS = {
-    "DXY": "^DXY",
-    "USD/BRL": "BRL=X",
-    "IBOV": "^BVSP",
-    "S&P 500": "^GSPC",
-    "Nasdaq": "^IXIC",
-    "Dow": "^DJI",
-    "VIX": "^VIX",
-    "Ouro": "GC=F",
-    "Brent": "BZ=F",
-}
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            parent_id INTEGER,
+            kind TEXT CHECK(kind IN ('expense','income','tax','payroll')) NOT NULL DEFAULT 'expense'
+        );
+        """
+    )
 
-def _fmt_change(last: float, prev: float) -> str:
-    if np.isnan(last) or np.isnan(prev) or prev == 0:
-        return "—"
-    pct = (last / prev - 1.0) * 100
-    sign = "▲" if pct >= 0 else "▼"
-    color = "#16a34a" if pct >= 0 else "#dc2626"
-    return f'<span style="color:{color};">{sign} {pct:+.2f}%</span>'
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cost_centers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL
+        );
+        """
+    )
 
-@st.cache_data(ttl=300, show_spinner=False)
-def load_econ_batch():
-    tickers = list(ECON_TICKERS.values())
-    end = dt.date.today()
-    start = end - dt.timedelta(days=10)
-    try:
-        df = yf.download(
-            tickers=" ".join(tickers),
-            start=start, end=end + dt.timedelta(days=1),
-            interval="1d", auto_adjust=True, progress=False,
-            group_by="ticker", threads=False,
-        )
-    except Exception:
-        return {}
-    out = {}
-    for name, t in ECON_TICKERS.items():
-        try:
-            s = df[t]["Close"].dropna()
-            last = float(s.iloc[-1]) if len(s) >= 1 else np.nan
-            prev = float(s.iloc[-2]) if len(s) >= 2 else np.nan
-            out[name] = (last, prev)
-        except Exception:
-            out[name] = (np.nan, np.nan)
-    return out
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            bank_account_id INTEGER,
+            closing_day INTEGER,
+            due_day INTEGER,
+            credit_limit REAL,
+            FOREIGN KEY(bank_account_id) REFERENCES accounts(id)
+        );
+        """
+    )
 
-def build_marquee_html():
-    data = load_econ_batch()
-    items = []
-    for name, (last, prev) in data.items():
-        if str(last) == "nan":
-            text = f"<b>{name}</b>: n/d"
-        else:
-            val = f"{last:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            delta = _fmt_change(last, prev)
-            text = f"<b>{name}</b>: {val} {delta}"
-        items.append(text)
-    content = " &nbsp;&nbsp;•&nbsp;&nbsp; ".join(items)
-    html = f"""
-    <style>
-      .ticker-wrap {{ position:relative; overflow:hidden; background:#0b1220; border-bottom:1px solid #1f2a44; }}
-      .ticker {{ display:inline-block; white-space:nowrap; padding:8px 0; animation:ticker-scroll 35s linear infinite;
-                 font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; font-size:14px; color:#e5e7eb; }}
-      .ticker:hover {{ animation-play-state: paused; }}
-      @keyframes ticker-scroll {{ 0% {{ transform: translateX(100%); }} 100% {{ transform: translateX(-100%); }} }}
-      .ticker b {{ color:#93c5fd; }}
-    </style>
-    <div class="ticker-wrap"><div class="ticker">{content}</div></div>
-    """
-    return html
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trx_date TEXT NOT NULL,
+            due_date TEXT,
+            paid_date TEXT,
+            type TEXT CHECK(type IN ('expense','income','transfer','tax','payroll','card')) NOT NULL,
+            sector TEXT,
+            cost_center_id INTEGER,
+            category_id INTEGER,
+            account_id INTEGER,
+            card_id INTEGER,
+            method TEXT,
+            doc_number TEXT,
+            counterparty TEXT,
+            description TEXT,
+            amount REAL NOT NULL,
+            status TEXT CHECK(status IN ('planned','paid','overdue','reconciled','canceled')) NOT NULL DEFAULT 'planned',
+            tags TEXT,
+            origin TEXT CHECK(origin IN ('manual','bank','card','import')) DEFAULT 'manual',
+            external_id TEXT UNIQUE,
+            attachment_path TEXT,
+            FOREIGN KEY(cost_center_id) REFERENCES cost_centers(id),
+            FOREIGN KEY(category_id) REFERENCES categories(id),
+            FOREIGN KEY(account_id) REFERENCES accounts(id),
+            FOREIGN KEY(card_id) REFERENCES cards(id)
+        );
+        """
+    )
 
-# =============== Dados de preços (resiliente) ===============
-def _extract_close(df: pd.DataFrame) -> pd.Series:
-    if df is None or df.empty:
-        return pd.Series(dtype="float64")
-    if isinstance(df.columns, pd.MultiIndex):
-        for c in df.columns:
-            if (isinstance(c, tuple) and len(c) > 0 and str(c[0]).lower() == "close") or (
-                isinstance(c, str) and c.lower() == "close"
-            ):
-                return df[c].dropna()
-        return df["Close"].dropna()
-    return df["Close"].dropna()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS payroll (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            period TEXT NOT NULL,
+            employee TEXT NOT NULL,
+            gross REAL NOT NULL,
+            charges REAL NOT NULL,
+            benefits REAL NOT NULL,
+            total REAL NOT NULL,
+            paid INTEGER NOT NULL DEFAULT 0
+        );
+        """
+    )
 
-def _make_index_naive(s: pd.Series) -> pd.Series:
-    try:
-        if getattr(s.index, "tz", None) is not None:
-            s.index = s.index.tz_localize(None)
-    except Exception:
-        try:
-            s.index = s.index.tz_convert(None)
-        except Exception:
-            pass
-    return s
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS taxes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            jurisdiction TEXT,
+            code TEXT,
+            periodicity TEXT,
+            due_day INTEGER
+        );
+        """
+    )
 
-def _clamp_start_for_interval(start: dt.date, end: dt.date, interval: str) -> dt.date:
-    if interval == "1h":
-        max_days = 730
-        min_start = end - dt.timedelta(days=max_days)
-        if start < min_start:
-            return min_start
-    return start
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            role TEXT CHECK(role IN ('owner','admin','user')) NOT NULL DEFAULT 'user',
+            account_id INTEGER,
+            sectors TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(account_id) REFERENCES accounts(id)
+        );
+        """
+    )
 
-def fetch_series_resilient(ticker: str, start_date: dt.date, end_date: dt.date, interval: str) -> pd.Series:
-    start_date = _clamp_start_for_interval(start_date, end_date, interval)
-    try:
-        t = yf.Ticker(ticker)
-        df = t.history(start=start_date, end=end_date + dt.timedelta(days=1), interval=interval, auto_adjust=True)
-        s = _extract_close(df); s = _make_index_naive(s)
-        s = s[(s.index >= pd.to_datetime(start_date)) & (s.index <= pd.to_datetime(end_date))]
-        if not s.empty:
-            return s
-    except Exception:
-        pass
-    try:
-        df = yf.download(
-            tickers=ticker, start=start_date, end=end_date + dt.timedelta(days=1),
-            interval=interval, auto_adjust=True, progress=False, threads=False,
-        )
-        s = _extract_close(df); s = _make_index_naive(s)
-        s = s[(s.index >= pd.to_datetime(start_date)) & (s.index <= pd.to_datetime(end_date))]
-        if not s.empty:
-            return s
-    except Exception:
-        pass
-    if interval != "1d":
-        for _int in ["1d"]:
-            try:
-                t = yf.Ticker(ticker)
-                df = t.history(start=start_date, end=end_date + dt.timedelta(days=1), interval=_int, auto_adjust=True)
-                s = _extract_close(df); s = _make_index_naive(s)
-                s = s[(s.index >= pd.to_datetime(start_date)) & (s.index <= pd.to_datetime(end_date))]
-                if not s.empty:
-                    return s
-            except Exception:
-                pass
-            try:
-                df = yf.download(
-                    tickers=ticker, start=start_date, end=end_date + dt.timedelta(days=1),
-                    interval=_int, auto_adjust=True, progress=False, threads=False,
-                )
-                s = _extract_close(df); s = _make_index_naive(s)
-                s = s[(s.index >= pd.to_datetime(start_date)) & (s.index <= pd.to_datetime(end_date))]
-                if not s.empty:
-                    return s
-            except Exception:
-                pass
-    return pd.Series(dtype="float64")
+    # Garantir coluna sectors caso venha de versão anterior
+    cols = [r[1] for r in cur.execute("PRAGMA table_info(users)").fetchall()]
+    if "sectors" not in cols:
+        cur.execute("ALTER TABLE users ADD COLUMN sectors TEXT")
 
-def preserve_last_when_empty(ticker: str, end_date: dt.date, lookback_days: int = 365):
-    start_lb = end_date - dt.timedelta(days=lookback_days)
-    try:
-        t = yf.Ticker(ticker)
-        df = t.history(start=start_lb, end=end_date + dt.timedelta(days=1), interval="1d", auto_adjust=True)
-        s = _extract_close(df); s = _make_index_naive(s)
-        if s.empty:
-            raise ValueError("history vazio")
-        last_date = s.index.max(); last_val = float(s.loc[last_date])
-        idx = pd.to_datetime([last_date, end_date])
-        vals = pd.Series([last_val, last_val], index=idx)
-        note = f"Último dado em {fmt_br(last_date.date())}; mantido até hoje."
-        return vals, note
-    except Exception:
-        return pd.Series(dtype="float64"), "Sem dados históricos."
+    conn.commit()
 
-def pct_change(s: pd.Series):
-    if s.size < 2:
-        return np.nan
-    return (s.iloc[-1] / s.iloc[0] - 1.0) * 100
 
-def _container_border():
-    try:
-        return st.container(border=True)
-    except TypeError:
-        return st.container()
+def fetch_df(query: str, params: tuple = ()):  # SELECT helper
+    conn = get_conn()
+    return pd.read_sql_query(query, conn, params=params)
 
-def mini_card(title, series, y_label="Preço", start_date=None, note=None,
-              width_px=280, height_px=180):
-    with _container_border():
-        sub = f"<div style='margin-top:-6px;color:#94a3b8;font-size:12px;'>desde {fmt_br(start_date)}</div>" if start_date else ""
-        st.markdown(f"#### {title}" + sub, unsafe_allow_html=True)
-        if series.empty:
-            st.warning("Sem dados para o período selecionado."); return
-        last = float(series.iloc[-1]); delta = pct_change(series)
-        c1, c2 = st.columns(2, gap="small")
-        with c1: st.metric("Último", f"{last:,.2f}")
-        with c2: st.metric("Período", f"{delta:+.2f}%")
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=series.index, y=series.values, mode="lines"))
-        fig.update_layout(width=width_px, height=height_px, margin=dict(l=16, r=10, t=6, b=6),
-                          xaxis_title=None, yaxis_title=y_label, showlegend=False, font=dict(size=10))
-        st.plotly_chart(fig, config={"displayModeBar": False})
-        if note: st.markdown(f"<div style='color:#94a3b8;font-size:12px'>{note}</div>", unsafe_allow_html=True)
 
-def mini_prop_card(proporcoes: dict, width_px=280, height_px=180, title="Proporção de Ativos"):
-    with _container_border():
-        st.markdown(f"#### {title}")
-        labels = list(proporcoes.keys()); values = list(proporcoes.values())
-        fig = go.Figure(data=[go.Pie(labels=labels, values=values, hole=0.5)])
-        fig.update_layout(width=width_px, height=height_px, margin=dict(l=10, r=10, t=10, b=10), showlegend=True)
-        st.plotly_chart(fig, config={"displayModeBar": False})
+def exec_sql(query: str, params: tuple = ()):  # INSERT/UPDATE/DELETE helper
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(query, params)
+    conn.commit()
+    return cur.lastrowid
 
-# =============== SELIC (BCB SGS 1178) ===============
-@st.cache_data(ttl=21600, show_spinner=False)
-def fetch_selic_index(start_date: dt.date, end_date: dt.date) -> pd.Series:
-    headers = {"User-Agent": "Mozilla/5.0 (Streamlit App)"}
-    base = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.1178/dados"
+# ---------------------- Settings helpers ----------------------
+def get_setting(key: str, default: str = "") -> str:
+    df = fetch_df("SELECT value FROM settings WHERE key = ?", (key,))
+    return df.iloc[0, 0] if not df.empty else default
 
-    def _to_index(rows):
-        if not rows:
-            return pd.Series(dtype="float64")
-        df = pd.DataFrame(rows)
-        if "data" not in df or "valor" not in df or df.empty:
-            return pd.Series(dtype="float64")
-        df["data"] = pd.to_datetime(df["data"], format="%d/%m/%Y", errors="coerce")
-        df["valor"] = (
-            df["valor"].astype(str)
-            .str.replace(".", "", regex=False)
-            .str.replace(",", ".", regex=False)
-        )
-        df["valor"] = pd.to_numeric(df["valor"], errors="coerce")
-        df = df.dropna(subset=["data", "valor"]).sort_values("data")
-        if df.empty:
-            return pd.Series(dtype="float64")
-        fator_dia = (1.0 + df["valor"] / 100.0) ** (1.0 / 252.0)
-        idx = fator_dia.cumprod()
-        idx = (idx / idx.iloc[0]) * 100.0
-        idx.index = df["data"]
-        idx = idx[(idx.index.date >= start_date) & (idx.index.date <= end_date)]
-        return idx
+def set_setting(key: str, value: str):
+    exec_sql("REPLACE INTO settings (key,value) VALUES (?,?)", (key, value))
 
-    try:
-        r = requests.get(
-            base,
-            params={
-                "formato": "json",
-                "dataInicial": pd.to_datetime(start_date).strftime("%d/%m/%Y"),
-                "dataFinal":   pd.to_datetime(end_date).strftime("%d/%m/%Y"),
-            },
-            headers=headers,
-            timeout=20,
-        )
-        r.raise_for_status()
-        out = _to_index(r.json())
-        if not out.empty:
-            return out
-    except Exception:
-        pass
+# ---------------------- Seed mínimo ----------------------
+def seed_minimums():
+    if fetch_df("SELECT COUNT(*) as n FROM accounts").iloc[0, 0] == 0:
+        exec_sql("INSERT INTO accounts (name, type, institution, number) VALUES (?,?,?,?)",
+                 ("Conta Corrente Principal", 'bank', 'Banco Exemplo', '0001-1'))
+        exec_sql("INSERT INTO accounts (name, type, institution, number) VALUES (?,?,?,?)",
+                 ("Caixa", 'cash', '', ''))
+    if fetch_df("SELECT COUNT(*) as n FROM categories").iloc[0, 0] == 0:
+        base = [
+            ("Energia Elétrica", None, 'expense'),
+            ("Água", None, 'expense'),
+            ("Frete", None, 'expense'),
+            ("Vendas", None, 'income'),
+            ("ICMS", None, 'tax'),
+            ("Folha - Salários", None, 'payroll'),
+        ]
+        for n, p, k in base:
+            exec_sql("INSERT INTO categories (name,parent_id,kind) VALUES (?,?,?)", (n, p, k))
+    if fetch_df("SELECT COUNT(*) as n FROM cost_centers").iloc[0, 0] == 0:
+        for n in ["Administrativo", "Produção", "Comercial", "Logística"]:
+            exec_sql("INSERT INTO cost_centers (name) VALUES (?)", (n,))
 
-    try:
-        days = (end_date - start_date).days + 10
-        N = min(max(days, 30), 5000)
-        url2 = f"{base}/ultimos/{N}"
-        r2 = requests.get(url2, params={"formato": "json"}, headers=headers, timeout=20)
-        r2.raise_for_status()
-        out2 = _to_index(r2.json())
-        if not out2.empty:
-            return out2
-    except Exception:
-        pass
-
-    try:
-        r3 = requests.get(
-            base,
-            params={
-                "formato": "csv",
-                "dataInicial": pd.to_datetime(start_date).strftime("%d/%m/%Y"),
-                "dataFinal":   pd.to_datetime(end_date).strftime("%d/%m/%Y"),
-            },
-            headers=headers,
-            timeout=20,
-        )
-        r3.raise_for_status()
-        lines = [ln for ln in r3.text.splitlines() if ln.strip()]
-        if len(lines) >= 2:
-            rows = []
-            for ln in lines[1:]:
-                parts = ln.split(";")
-                if len(parts) >= 2:
-                    rows.append({"data": parts[0].strip(), "valor": parts[1].strip()})
-            out3 = _to_index(rows)
-            if not out3.empty:
-                return out3
-    except Exception:
-        pass
-
-    return pd.Series(dtype="float64")
-
-# =============== LOG da Carteira ===============
-DATA_DIR = Path(".")
-LOG_FILE = str(DATA_DIR / "carteira_log.csv")
-LOG_COLS = ["data", "vcs_valor", "whs_valor", "vcs_pct", "whs_pct", "auto", "descricao", "ts"]
-
-def _load_log() -> pd.DataFrame:
-    if "log_df" in st.session_state and isinstance(st.session_state.log_df, pd.DataFrame):
-        df = st.session_state.log_df.copy()
-    elif os.path.exists(LOG_FILE):
-        try:
-            df = pd.read_csv(LOG_FILE, sep=",", encoding="utf-8")
-        except Exception:
-            df = pd.DataFrame(columns=LOG_COLS)
-    else:
-        df = pd.DataFrame(columns=LOG_COLS)
-    for c in LOG_COLS:
-        if c not in df.columns:
-            df[c] = np.nan
-    # normaliza tipos
-    df["data"] = pd.to_datetime(df["data"], errors="coerce").dt.date
-    df["ts"]   = pd.to_datetime(df["ts"], errors="coerce")
-    for c in ["vcs_valor","whs_valor","vcs_pct","whs_pct"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df["auto"] = df["auto"].astype("boolean")
-    df["descricao"] = df["descricao"].astype("string")
-    return df[LOG_COLS].copy()
-
-def _save_log(df: pd.DataFrame):
-    st.session_state.log_df = df.copy()
-    try:
-        out = df.copy()
-        out["data"] = pd.to_datetime(out["data"], errors="coerce").dt.strftime("%Y-%m-%d")
-        out["ts"]   = pd.to_datetime(out["ts"],   errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
-        out.to_csv(LOG_FILE, index=False, encoding="utf-8")
+# ---------------------- Login ----------------------
+def login_widget() -> bool:
+    auth_enabled = get_setting("auth_enabled", "0") == "1"
+    if not auth_enabled:
         return True
-    except Exception:
-        return False
-
-def _get_last_log():
-    df = _load_log()
-    if df is None or df.empty:
-        return None
-    df = df.sort_values(["data", "ts"], ascending=[False, False]).reset_index(drop=True)
-    return df.iloc[0]
-
-# =============== Sidebar (controles) ===============
-show_marquee = st.sidebar.checkbox("Mostrar faixa de índices no topo", value=True)
-interval = st.sidebar.selectbox("Intervalo", ["1d", "1h", "1wk"], index=0)
-
-st.sidebar.markdown("### Criptos")
-if "assets_on" not in st.session_state:
-    st.session_state.assets_on = {"BTC-USD": True, "ETH-USD": True, "SOL-USD": True}
-for sym in ["BTC-USD", "ETH-USD", "SOL-USD"]:
-    st.session_state.assets_on[sym] = st.sidebar.checkbox(sym, value=st.session_state.assets_on[sym])
-
-today = dt.date.today()
-default_since = today - dt.timedelta(days=365)
-
-st.sidebar.markdown("**Datas de entrada (Criptos)**")
-date_since_crypto = {}
-if st.session_state.assets_on.get("BTC-USD", False):
-    date_since_crypto["BTC-USD"] = st.sidebar.date_input("BTC desde", value=default_since, max_value=today, key="btc_since")
-if st.session_state.assets_on.get("ETH-USD", False):
-    date_since_crypto["ETH-USD"] = st.sidebar.date_input("ETH desde", value=default_since, max_value=today, key="eth_since")
-if st.session_state.assets_on.get("SOL-USD", False):
-    date_since_crypto["SOL-USD"] = st.sidebar.date_input("SOL desde", value=default_since, max_value=today, key="sol_since")
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("### Ativa (IBOV)")
-since_ibov = st.sidebar.date_input("IBOV desde", value=default_since, max_value=today, key="ibov_since")
-
-st.sidebar.markdown("---")
-
-# ***** Navegação (no corpo, mas controla visibilidade do menu da Carteira) *****
-if "active_tab" not in st.session_state:
-    st.session_state.active_tab = "📈 Criptos"
-active_tab = st.radio("Navegação", ["📈 Criptos", "📊 Ativa"], index=(0 if st.session_state.active_tab=="📈 Criptos" else 1), horizontal=True)
-st.session_state.active_tab = active_tab
-
-# ===== Placeholder defaults (caso aba Ativa não esteja ativa ainda) =====
-auto_pct = True
-valor_vcs = 0.0
-valor_whs = 0.0
-vcs_pct = 0.0
-whs_pct = 100.0
-log_date = today
-log_desc = ""
-sel_idx = None
-use_saved = False
-
-# Mostra Carteira/Registro no sidebar SOMENTE quando a aba Ativa está ativa
-if active_tab == "📊 Ativa":
-    last = _get_last_log()
-    last_vcs_valor = float(last["vcs_valor"]) if last is not None and pd.notna(last.get("vcs_valor")) else 0.0
-    last_whs_valor = float(last["whs_valor"]) if last is not None and pd.notna(last.get("whs_valor")) else 0.0
-    last_vcs_pct   = float(last["vcs_pct"])   if last is not None and pd.notna(last.get("vcs_pct"))   else 0.0
-    last_whs_pct   = float(last["whs_pct"])   if last is not None and pd.notna(last.get("whs_pct"))   else 100.0
-    last_date      = pd.to_datetime(last["data"]).date() if last is not None and pd.notna(last.get("data")) else today
-    last_desc      = str(last.get("descricao") or "") if last is not None else ""
-
-    st.sidebar.markdown("### Carteira (Ativa)")
-    auto_pct = st.sidebar.checkbox("Calcular proporção automaticamente pelos valores", value=True, key="auto_pct")
-    valor_vcs_str = st.sidebar.text_input("Valor VCS (R$)", value=brl(last_vcs_valor) if last is not None else "R$ 0,00", help="Ex.: 50.000,50", key="vcs_valor_txt")
-    valor_whs_str = st.sidebar.text_input("Valor WHS (R$)", value=brl(last_whs_valor) if last is not None else "R$ 0,00", help="Ex.: 1.000,00", key="whs_valor_txt")
-    valor_vcs = parse_brl_text(valor_vcs_str)
-    valor_whs = parse_brl_text(valor_whs_str)
-    valor_total = float(valor_vcs) + float(valor_whs)
-    if auto_pct:
-        if valor_total > 0:
-            vcs_pct = round((valor_vcs / valor_total) * 100.0, 2)
-            whs_pct = round(100.0 - vcs_pct, 2)
-        else:
-            # sem valores digitados → usa última proporção registrada
-            vcs_pct = last_vcs_pct
-            whs_pct = last_whs_pct
-        st.sidebar.markdown(f"**VCS (%)**: {vcs_pct:.2f}%  \n**WHS (%)**: {whs_pct:.2f}%")
-    else:
-        # inicia com a última proporção
-        vcs_pct = st.sidebar.number_input("Proporção VCS (%)", min_value=0.0, max_value=100.0, value=float(last_vcs_pct), step=0.01, key="vcs_pct_num")
-        whs_pct = round(100.0 - float(vcs_pct), 2)
-        st.sidebar.markdown(f"**WHS (%)**: {whs_pct:.2f}%")
-
-    # ---- Log (salvar/selecionar) ----
-    st.sidebar.markdown("#### Registro da carteira")
-    log_date = st.sidebar.date_input("Data do registro", value=last_date, max_value=today, key="carteira_data")
-    log_desc = st.sidebar.text_input("Descrição/nota (opcional)", value=last_desc, key="carteira_desc")
-
-    if st.sidebar.button("💾 Salvar registro", use_container_width=True, key="save_log_btn"):
-        try:
-            df_log = _load_log()
-            new_row = {
-                "data": log_date,
-                "vcs_valor": round(float(valor_vcs), 2),
-                "whs_valor": round(float(valor_whs), 2),
-                "vcs_pct": round(float(vcs_pct), 2),
-                "whs_pct": round(float(whs_pct), 2),
-                "auto": bool(auto_pct),
-                "descricao": log_desc,
-                "ts": dt.datetime.now(),
+    st.sidebar.markdown("### Entrar")
+    email = st.sidebar.text_input("Email")
+    pwd = st.sidebar.text_input("Senha", type="password")
+    ok = st.sidebar.button("Login")
+    if ok:
+        u = fetch_df("SELECT * FROM users WHERE email = ? AND is_active = 1", (email.strip().lower(),))
+        if not u.empty and u.iloc[0]["password_hash"] == hash_password(pwd):
+            st.session_state["user"] = {
+                "id": int(u.iloc[0]["id"]),
+                "name": u.iloc[0]["name"],
+                "email": u.iloc[0]["email"],
+                "role": u.iloc[0]["role"],
+                "account_id": int(u.iloc[0]["account_id"]) if pd.notna(u.iloc[0]["account_id"]) else None,
+                "sectors": [s.strip() for s in str(u.iloc[0]["sectors"] or "").split(",") if s.strip()],
             }
-            df_log = pd.concat([df_log, pd.DataFrame([new_row])], ignore_index=True)
-            _save_log(df_log)
-            st.sidebar.success("Registro salvo!")
-        except Exception as e:
-            st.sidebar.error(f"Falha ao salvar registro: {e}")
+            st.experimental_rerun()
+        else:
+            st.sidebar.error("Credenciais inválidas")
+    if "user" in st.session_state:
+        u = st.session_state["user"]
+        st.sidebar.success(f"Olá, {u['name']}")
+        if st.sidebar.button("Sair"):
+            del st.session_state["user"]
+            st.experimental_rerun()
+        return True
+    return False
 
-    df_log = _load_log()
-    if not df_log.empty:
-        df_log = df_log.sort_values(["data", "ts"], ascending=[False, False]).reset_index(drop=True)
-        def _fmt_row(i):
-            r = df_log.iloc[i]
-            tot = (float(r.get("vcs_valor", 0)) + float(r.get("whs_valor", 0)))
-            dstr = fmt_br(r["data"])
-            desc = str(r["descricao"]) if isinstance(r["descricao"], str) else ""
-            return f"{dstr} — VCS {float(r['vcs_pct']):.2f}% | Total {brl(tot)}" + (f" — {desc}" if desc else "")
-        sel_idx = st.sidebar.selectbox("Selecionar registro salvo", list(range(len(df_log))), index=0, format_func=_fmt_row, key="sel_log_idx")
-        use_saved = st.sidebar.checkbox("Usar registro salvo no gráfico", value=True, key="use_saved_chk")
-    else:
-        sel_idx = None
-        use_saved = False
-        st.sidebar.info("Nenhum registro salvo ainda.")
 
-# =============== Topo ===============
-if show_marquee:
-    st.markdown(build_marquee_html(), unsafe_allow_html=True)
+def require_role(min_role: str) -> bool:
+    ranking = {"user": 1, "admin": 2, "owner": 3}
+    if get_setting("auth_enabled", "0") != "1":
+        return True
+    if "user" not in st.session_state:
+        st.warning("Faça login para acessar esta seção.")
+        return False
+    return ranking.get(st.session_state["user"]["role"], 1) >= ranking.get(min_role, 1)
 
-# =============== Carregamento de séries ===============
-end = dt.date.today()
+# ---------------------- Helpers de UI ----------------------
+def money(v: float) -> str:
+    return (f"R$ {v:,.2f}").replace(",", "X").replace(".", ",").replace("X", ".")
 
-# Criptos
-assets = {}
-for sym in ["BTC-USD", "ETH-USD", "SOL-USD"]:
-    if st.session_state.assets_on.get(sym, False) and sym in date_since_crypto:
-        start = date_since_crypto[sym]
-        try:
-            s = fetch_series_resilient(sym, start, end, interval)
-            note = None
-            if s.empty:
-                s, note = preserve_last_when_empty(sym, end)
-            assets[sym] = (s, start, note)
-        except Exception as e:
-            st.warning(f"Falha ao carregar {sym}: {e}")
 
-# IBOV + fallbacks
-ibov_used = None
-ibov_note = None
-ibov = pd.Series(dtype="float64")
-for candidate in ["^BVSP", "^IBOV", "BOVA11.SA"]:
+def safe_label(x):
     try:
-        s_try = fetch_series_resilient(candidate, since_ibov, end, interval)
-        note_try = None
-        if s_try.empty:
-            s_try, note_try = preserve_last_when_empty(candidate, end)
-        if not s_try.empty:
-            ibov = s_try
-            ibov_used = candidate
-            ibov_note = note_try
-            break
+        if isinstance(x, tuple):
+            lab = x[1]
+        else:
+            lab = x
+        if lab is None or (isinstance(lab, float) and pd.isna(lab)):
+            return "—"
+        return str(lab)
     except Exception:
-        continue
-if ibov_used and ibov_used != "^BVSP":
-    extra = "IBOV (alt)" if ibov_used == "^IBOV" else "BOVA11 (proxy)"
-    ibov_note = (ibov_note + " • " if ibov_note else "") + f"Fonte: {extra}"
+        return "—"
 
-# =============== UI principal ===============
-st.title("Painel Financeiro | JVSeps")
 
-br_btc = fmt_br(date_since_crypto.get("BTC-USD")) if "BTC-USD" in date_since_crypto else "—"
-br_eth = fmt_br(date_since_crypto.get("ETH-USD")) if "ETH-USD" in date_since_crypto else "—"
-br_sol = fmt_br(date_since_crypto.get("SOL-USD")) if "SOL-USD" in date_since_crypto else "—"
-br_ibv = fmt_br(since_ibov)
-src_note = f" • Ticker IBOV usado: {ibov_used}" if ibov_used else ""
-st.caption(
-    f"Intervalo: {interval} • "
-    f"Criptos: BTC {br_btc} | ETH {br_eth} | SOL {br_sol} • "
-    f"Ativa: IBOV {br_ibv}{src_note}"
-)
+def export_excel(df: pd.DataFrame, filename: str = "relatorio.xlsx"):
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False)
+    st.download_button(
+        "⬇️ Exportar Excel",
+        data=buf.getvalue(),
+        file_name=filename,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
-# ***** Navegação de conteúdo *****
-if active_tab == "📈 Criptos":
-    if not assets:
-        st.info("Nenhuma cripto selecionada ou sem dados para o período.")
+def export_csv(df: pd.DataFrame, filename: str = "relatorio.csv"):
+    st.download_button(
+        "⬇️ Exportar CSV",
+        data=df.to_csv(index=False).encode("utf-8"),
+        file_name=filename,
+        mime="text/csv",
+    )
+
+# --- Anexos: preview e download ---
+def _read_file_bytes(path: str) -> bytes | None:
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except Exception:
+        return None
+
+def show_attachment_ui(path: str):
+    if not path or not os.path.exists(path):
+        st.warning("Anexo não encontrado no disco.")
+        return
+    fname = os.path.basename(path)
+    ext = os.path.splitext(path)[1].lower()
+    data = _read_file_bytes(path)
+    if data is None:
+        st.error("Falha ao abrir o anexo.")
+        return
+    # Preview simples para imagens
+    if ext in (".png", ".jpg", ".jpeg"):
+        st.image(data, caption=fname, use_column_width=True)
     else:
-        cards = []
-        for sym in ["BTC-USD", "ETH-USD", "SOL-USD"]:
-            if sym in assets:
-                s, sdate, note = assets[sym]
-                cards.append((sym, s, "USD", sdate, note))
-        for i in range(0, len(cards), 4):
-            cols = st.columns(4, gap="small")
-            for c in range(4):
-                if i + c >= len(cards): break
-                sym, serie, ylab, sdate, note = cards[i + c]
-                with cols[c]:
-                    mini_card(sym, serie, y_label=ylab, start_date=sdate, note=note)
+        st.info("Pré-visualização inline disponível apenas para imagens. Use o botão para baixar o arquivo.")
+    st.download_button("⬇️ Baixar anexo", data=data, file_name=fname)
 
-else:  # 📊 Ativa
-    # usa por padrão o último registro salvo
-    base_vals = _get_last_log()
-    default_from_log = {
-        "vcs_pct": float(base_vals["vcs_pct"]) if base_vals is not None and pd.notna(base_vals.get("vcs_pct")) else 0.0,
-        "whs_pct": float(base_vals["whs_pct"]) if base_vals is not None and pd.notna(base_vals.get("whs_pct")) else 100.0,
-        "vcs_valor": float(base_vals["vcs_valor"]) if base_vals is not None and pd.notna(base_vals.get("vcs_valor")) else 0.0,
-        "whs_valor": float(base_vals["whs_valor"]) if base_vals is not None and pd.notna(base_vals.get("whs_valor")) else 0.0,
-    }
-    use_vals = {
-        "vcs_pct": default_from_log["vcs_pct"],
-        "whs_pct": default_from_log["whs_pct"],
-        "vcs_valor": default_from_log["vcs_valor"],
-        "whs_valor": default_from_log["whs_valor"],
-        "origem": "log(padrão)"
-    }
-    # Se usuário selecionar outro registro e marcar "usar registro", troca
-    if use_saved and sel_idx is not None and not _load_log().empty:
-        r = _load_log().iloc[int(sel_idx)]
-        use_vals = {
-            "vcs_pct": float(r["vcs_pct"] or 0.0),
-            "whs_pct": float(r["whs_pct"] or 0.0),
-            "vcs_valor": float(r["vcs_valor"] or 0.0),
-            "whs_valor": float(r["whs_valor"] or 0.0),
-            "origem": "registro"
-        }
+# Aplica escopo por conta e setor
+def scope_filters(base_query: str, params: list) -> tuple[str, list]:
+    if get_setting("auth_enabled", "0") == "1" and "user" in st.session_state:
+        acc = st.session_state["user"].get("account_id")
+        sectors = st.session_state["user"].get("sectors", [])
+        if acc:
+            base_query += " AND (account_id IS NULL OR account_id = ?)"
+            params.append(acc)
+        if sectors:
+            placeholders = ",".join(["?"] * len(sectors))
+            base_query += f" AND (sector IS NULL OR sector IN ({placeholders}))"
+            params.extend(sectors)
+    return base_query, params
 
-    st.markdown("### 💼 Carteira (Ativa)")
-    st.caption(f"Valores baseados em {use_vals['origem']}.")
+# ---------------------- Componentes de UI ----------------------
+def header():
+    st.title("FinApp — Controle Financeiro de Pequenas Empresas")
+    st.caption("Lançamentos por setor, conciliação e relatórios, com guias amigáveis.")
 
-    # normaliza soma 100
-    total_pct = use_vals["vcs_pct"] + use_vals["whs_pct"]
-    if total_pct > 0 and abs(total_pct - 100.0) > 0.01:
-        p = use_vals["vcs_pct"] * 100.0 / total_pct
-        use_vals["vcs_pct"] = round(p, 2)
-        use_vals["whs_pct"] = round(100.0 - p, 2)
+def kpis_overview():
+    query = "SELECT type, status, amount, account_id, sector FROM transactions WHERE 1=1"
+    query, params = scope_filters(query, [])
+    df = fetch_df(query, tuple(params))
+    if df.empty:
+        st.info("Sem lançamentos ainda. Use as guias para começar.")
+        return
+    total_desp = df.query("type in ['expense','tax','payroll','card']")["amount"].sum()
+    total_rec = df.query("type == 'income'")["amount"].sum()
+    saldo = total_rec - total_desp
 
-    col_left, col_right = st.columns([1, 1], gap="small")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Receitas", money(total_rec))
+    c2.metric("Despesas", money(total_desp))
+    c3.metric("Saldo", money(saldo))
 
-    with col_left:
-        # Pizza sempre usando o último log
-        _log_all = _load_log()
-        _vcs_last = float(use_vals.get("vcs_pct", 0.0))
-        _whs_last = float(use_vals.get("whs_pct", 0.0))
-        try:
-            if _log_all is not None and not _log_all.empty:
-                _log_all = _log_all.sort_values(["data", "ts"], ascending=[False, False]).reset_index(drop=True)
-                _last = _log_all.iloc[0]
-                _v = float(_last.get("vcs_pct", 0.0) or 0.0)
-                _w = float(_last.get("whs_pct", 0.0) or 0.0)
-                _tot = _v + _w
-                if _tot > 0:
-                    _vcs_last = round(_v * 100.0 / _tot, 2)
-                    _whs_last = round(100.0 - _vcs_last, 2)
-        except Exception:
-            pass
-        mini_prop_card({"VCS": _vcs_last, "WHS": _whs_last},
-                       title="Proporção de Ativos (VCS/WHS)",
-                       width_px=240, height_px=160)
+    st.divider()
+    st.subheader("Últimos lançamentos")
+    q = """
+        SELECT t.id, t.trx_date as Data, t.type as Tipo, t.description as Descrição, t.amount as Valor,
+               (SELECT name FROM categories c WHERE c.id = t.category_id) as Categoria,
+               (SELECT name FROM cost_centers cc WHERE cc.id = t.cost_center_id) as Centro_de_Custos,
+               t.sector as Setor,
+               t.status as Status
+        FROM transactions t WHERE 1=1
+    """
+    q, p = scope_filters(q, [])
+    q += " ORDER BY t.id DESC LIMIT 10"
+    st.dataframe(fetch_df(q, tuple(p)), use_container_width=True)
 
-    with col_right:
-        with _container_border():
-            st.markdown("#### Valores da Carteira")
-            c1, c2 = st.columns(2, gap="small")
-            tot = float(use_vals["vcs_valor"]) + float(use_vals["whs_valor"])
-            with c1:
-                st.metric("VCS", brl(use_vals["vcs_valor"]))
-                st.metric("WHS", brl(use_vals["whs_valor"]))
-            with c2:
-                st.metric("Total", brl(tot))
-                st.metric("VCS (%)", f"{use_vals['vcs_pct']:.2f}%")
+def form_lancamento_generico(default_type: str = 'expense', label: str = "Novo lançamento", force_account_id: int | None = None):
+    st.markdown(f"**{label}**")
+    with st.form(f"form_{label}_{default_type}"):
+        c1, c2, c3 = st.columns(3)
+        dt_val = c1.date_input("Data", value=date.today())
+        amount = c2.number_input("Valor (R$)", min_value=0.0, step=0.01, format="%.2f")
+        method = c3.selectbox("Meio de Pagamento", ["pix", "ted", "boleto", "dinheiro", "cartão", "outro"]) if default_type != 'card' else "cartão"
 
-    # ===== Listagem de LOGs =====
-    st.markdown("### 🗂️ Registros salvos da carteira")
-    _df = _load_log()
-    if _df.empty:
-        st.info("Nenhum registro salvo até o momento.")
-    else:
-        df_show = _df.copy()
-        df_show["Data"] = pd.to_datetime(df_show["data"], errors="coerce").dt.strftime("%d/%m/%y")
-        df_show["Total"] = (pd.to_numeric(df_show["vcs_valor"], errors="coerce").fillna(0.0) +
-                            pd.to_numeric(df_show["whs_valor"], errors="coerce").fillna(0.0))
-        df_show["VCS (R$)"] = df_show["vcs_valor"].apply(brl)
-        df_show["WHS (R$)"] = df_show["whs_valor"].apply(brl)
-        df_show["Total (R$)"] = df_show["Total"].apply(brl)
-        df_show["VCS (%)"] = df_show["vcs_pct"].map(lambda x: f"{float(x):.2f}%")
-        df_show["WHS (%)"] = df_show["whs_pct"].map(lambda x: f"{float(x):.2f}%")
-        df_show["Auto?"] = df_show["auto"].map(lambda x: "Sim" if bool(x) else "Não")
-        df_show["Criado em"] = pd.to_datetime(df_show["ts"], errors="coerce").dt.strftime("%d/%m/%y %H:%M")
+        c4, c5, c6 = st.columns(3)
+        accounts_df = fetch_df("SELECT id, name FROM accounts WHERE type <> 'card'")
+        # Se login ativo e usuario tem account_id, pré-selecionar/forçar
+        if force_account_id:
+            acc = (
+                (force_account_id, accounts_df.loc[accounts_df.id == force_account_id, "name"].values[0])
+                if (not accounts_df.empty and (accounts_df.id == force_account_id).any())
+                else (None, "—")
+            )
+            c4.caption(f"Conta vinculada: {acc[1]}")
+        else:
+            acc_options = [(None, "—")] + [(int(r.id), r.name) for _, r in accounts_df.iterrows()]
+            acc = c4.selectbox("Conta", options=acc_options, format_func=safe_label)
 
-        cols_order = ["Data", "Descrição", "VCS (R$)", "WHS (R$)", "Total (R$)", "VCS (%)", "WHS (%)", "Auto?", "Criado em"]
-        df_show.rename(columns={"descricao": "Descrição"}, inplace=True)
-        df_show = df_show[cols_order]
+        if default_type != 'income':
+            categories_df = fetch_df("SELECT id, name FROM categories WHERE kind IN ('expense','tax','payroll')")
+        else:
+            categories_df = fetch_df("SELECT id, name FROM categories WHERE kind = 'income'")
+        cat_options = [(None, "—")] + [(int(r.id), r.name) for _, r in categories_df.iterrows()]
+        cat = c5.selectbox("Categoria", options=cat_options, format_func=safe_label)
 
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
+        # Limitar setores conforme escopo do usuário
+        allowed_sectors = st.session_state.get("user", {}).get("sectors", []) if get_setting("auth_enabled", "0") == "1" else []
+        sector_options = allowed_sectors if allowed_sectors else ["Administrativo", "Produção", "Comercial", "Logística", "Outros"]
+        sector = c6.selectbox("Setor", sector_options)
 
-        colb1, colb2, colb3 = st.columns([1,1,2], gap="small")
-        with colb1:
-            if st.button("🗑️ Excluir registro selecionado", key="btn_del_log"):
-                if sel_idx is None or _df.empty:
-                    st.warning("Nenhum registro selecionado.")
-                else:
-                    df_new = _df.drop(_df.index[int(sel_idx)]).reset_index(drop=True)
-                    _save_log(df_new)
-                    st.success("Registro excluído.")
-                    do_rerun()
-        with colb2:
-            csv_bytes = _df.to_csv(index=False).encode("utf-8")
-            st.download_button("⬇️ Baixar CSV", data=csv_bytes, file_name="carteira_log.csv", mime="text/csv", key="btn_csv_download")
-        with colb3:
-            import io
-            buf = io.BytesIO()
-            wrote = False
-            try:
-                with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
-                    _df.to_excel(writer, sheet_name="LogCarteira", index=False)
-                wrote = True
-            except Exception:
-                try:
-                    buf = io.BytesIO()
-                    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                        _df.to_excel(writer, sheet_name="LogCarteira", index=False)
-                    wrote = True
-                except Exception:
-                    wrote = False
+        c7, c8 = st.columns([2, 1])
+        desc = c7.text_input("Descrição")
+        doc = c8.text_input("Documento/Nota")
 
-            if wrote:
-                st.download_button(
-                    "⬇️ Baixar XLSX",
-                    data=buf.getvalue(),
-                    file_name="carteira_log.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="btn_xlsx_download",
-                )
+        c9, c10, c11 = st.columns(3)
+        party = c9.text_input("Contraparte (fornecedor/cliente)")
+        status_index = 1 if default_type != "income" else 0
+        status = c10.selectbox("Status", ["planned", "paid", "overdue", "reconciled", "canceled"], index=status_index)
+        attach = c11.file_uploader("Comprovante (opcional)", type=["pdf", "png", "jpg", "jpeg"])
+
+        submitted = st.form_submit_button("Salvar lançamento")
+        if submitted:
+            if amount <= 0:
+                st.error("Informe um valor maior que zero.")
             else:
-                st.warning("Não foi possível gerar XLSX (módulos ausentes). Baixe o CSV acima.")
+                attach_path = None
+                if attach is not None:
+                    fname = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{attach.name}"
+                    fpath = os.path.join(ATTACH_DIR, fname)
+                    with open(fpath, "wb") as f:
+                        f.write(attach.getbuffer())
+                    attach_path = fpath
 
-    st.markdown("---")
+                account_id_final = force_account_id if force_account_id else (acc[0] if isinstance(acc, tuple) else None)
+                exec_sql(
+                    """
+                    INSERT INTO transactions (
+                        trx_date, type, sector, cost_center_id, category_id, account_id,
+                        method, doc_number, counterparty, description, amount, status, origin, attachment_path
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        dt_val.isoformat(), default_type, sector,
+                        None,  # cost center opcional
+                        (cat[0] if isinstance(cat, tuple) else None),
+                        account_id_final,
+                        method, doc, party, desc, float(amount), status, 'manual', attach_path
+                    )
+                )
+                st.success("Lançamento salvo!")
+                st.experimental_rerun()
 
-    # ===== Gráficos IBOV + SELIC =====
-    try:
-        selic_start = None
-        if use_saved and sel_idx is not None and not _load_log().empty:
-            _rlog = _load_log().iloc[int(sel_idx)]
-            _d = _rlog.get('data')
-            if pd.notna(_d):
-                selic_start = pd.to_datetime(_d).date()
-        if selic_start is None:
-            selic_start = pd.to_datetime(log_date).date() if pd.notna(pd.to_datetime(log_date, errors='coerce')) else since_ibov
-        if selic_start > end:
-            selic_start = end
-    except Exception:
-        selic_start = since_ibov
+# ---------------------- Páginas ----------------------
+def page_dashboard():
+    header()
+    kpis_overview()
 
-    cols_mk1, cols_mk2 = st.columns(2, gap="small")
+def page_extratos_bancarios():
+    st.header("Extratos Bancários")
+    st.caption("Importe CSV simples (data, descrição, valor) e classifique rapidamente.")
 
-    with cols_mk1:
-        if ibov.empty:
-            st.info("Sem dados do IBOV/Proxy para o período.")
+    accounts_df = fetch_df("SELECT id, name FROM accounts WHERE type='bank'")
+    if not accounts_df.empty:
+        accounts_df["name"] = accounts_df["name"].fillna("—").astype(str)
+    force_acc = st.session_state.get("user", {}).get("account_id") if get_setting("auth_enabled", "0") == "1" else None
+    if accounts_df.empty and not force_acc:
+        st.warning("Nenhuma conta bancária cadastrada em Configurações > Contas.")
+        return
+
+    if force_acc:
+        st.info("Importando para a conta vinculada ao seu usuário.")
+        if not accounts_df.empty and (accounts_df.id == force_acc).any():
+            acc_name = accounts_df.loc[accounts_df.id == force_acc, "name"].iloc[0]
         else:
-            mini_card("Índice Bovespa", ibov, y_label="Pts",
-                      start_date=since_ibov, note=ibov_note,
-                      width_px=260, height_px=160)
+            acc_name = "Conta do Usuário"
+        acc = (force_acc, acc_name)
+    else:
+        acc_options = [(int(r.id), r.name) for _, r in accounts_df.iterrows()]
+        acc = st.selectbox("Conta de destino", acc_options, format_func=safe_label)
 
-    with cols_mk2:
-        try:
-            selic_raw = fetch_selic_index(selic_start, end)
-        except Exception:
-            selic_raw = pd.Series(dtype="float64")
+    up = st.file_uploader("Arraste o CSV do banco", type=["csv"])
+    if up:
+        content = StringIO(up.getvalue().decode("utf-8"))
+        df = pd.read_csv(content)
+        st.write("Pré-visualização:")
+        st.dataframe(df.head(), use_container_width=True)
 
-        if selic_raw.empty:
-            st.info("Não foi possível obter a SELIC para o período selecionado.")
+        cols = list(df.columns)
+        col_date = st.selectbox("Coluna de Data", cols)
+        col_desc = st.selectbox("Coluna de Descrição", cols, index=min(1, len(cols) - 1))
+        col_val = st.selectbox("Coluna de Valor", cols, index=min(2, len(cols) - 1))
+
+        if st.button("Importar lançamentos"):
+            imp = df[[col_date, col_desc, col_val]].copy()
+            imp.columns = ["date", "desc", "amount"]
+            n_ok = 0
+            for _, r in imp.iterrows():
+                try:
+                    d = pd.to_datetime(r["date"]).date().isoformat()
+                    v = float(r["amount"])
+                    exec_sql(
+                        """
+                        INSERT INTO transactions (trx_date, type, sector, category_id, account_id,
+                                                  method, doc_number, counterparty, description, amount, status, origin)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            d, 'expense' if v < 0 else 'income', 'Administrativo', None,
+                            acc[0] if isinstance(acc, tuple) else acc,
+                            'extrato', '', '', str(r["desc"]).strip(), abs(v), 'paid', 'bank'
+                        )
+                    )
+                    n_ok += 1
+                except Exception as e:
+                    st.error(f"Falha ao importar uma linha: {e}")
+            st.success(f"Importação concluída: {n_ok} lançamentos")
+            st.experimental_rerun()
+
+    st.divider()
+    st.subheader("Lançamentos recentes do banco")
+    q = "SELECT trx_date as Data, description as Descrição, amount as Valor, status as Status, sector as Setor FROM transactions WHERE origin='bank'"
+    q, p = scope_filters(q, [])
+    q += " ORDER BY id DESC LIMIT 20"
+    st.dataframe(fetch_df(q, tuple(p)), use_container_width=True)
+
+def page_cartoes_credito():
+    st.header("Cartões de Crédito")
+    st.caption("Controle de faturas, despesas por cartão e conciliação com conta bancária.")
+
+    cards = fetch_df("SELECT id, name FROM cards")
+    if cards.empty:
+        st.info("Nenhum cartão cadastrado. Vá em Configurações > Cartões.")
+        return
+
+    card_options = [(int(r.id), r.name) for _, r in cards.iterrows()]
+    card = st.selectbox("Cartão", card_options, format_func=safe_label)
+
+    st.markdown("**Lançar despesa do cartão**")
+    with st.form("form_card"):
+        dt_val = st.date_input("Data", value=date.today())
+        amount = st.number_input("Valor (R$)", min_value=0.0, step=0.01)
+        desc = st.text_input("Descrição")
+        cat_df = fetch_df("SELECT id, name FROM categories WHERE kind='expense'")
+        cat_options = [(int(r.id), r.name) for _, r in cat_df.iterrows()]
+        cat = st.selectbox("Categoria", cat_options, format_func=safe_label)
+        # setor conforme escopo
+        allowed_sectors = st.session_state.get("user", {}).get("sectors", []) if get_setting("auth_enabled", "0") == "1" else []
+        sector_options = allowed_sectors if allowed_sectors else ["Administrativo", "Produção", "Comercial", "Logística", "Outros"]
+        sector = st.selectbox("Setor", sector_options)
+        attach = st.file_uploader("Comprovante (opcional)", type=["pdf", "png", "jpg", "jpeg"], key="card_attach")
+        ok = st.form_submit_button("Salvar")
+        if ok:
+            attach_path = None
+            if attach is not None:
+                fname = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{attach.name}"
+                fpath = os.path.join(ATTACH_DIR, fname)
+                with open(fpath, "wb") as f:
+                    f.write(attach.getbuffer())
+                attach_path = fpath
+            exec_sql(
+                """
+                INSERT INTO transactions (trx_date, type, card_id, category_id, description, amount, status, method, origin, sector, attachment_path)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (dt_val.isoformat(), 'card', card[0], cat[0], desc, float(amount), 'planned', 'cartão', 'card', sector, attach_path)
+            )
+            st.success("Lançado na fatura do cartão.")
+            st.experimental_rerun()
+
+    st.divider()
+    st.subheader("Lançamentos do cartão (recentes)")
+    df = fetch_df(
+        """
+        SELECT trx_date as Data, description as Descrição, amount as Valor, status as Status, sector as Setor
+        FROM transactions WHERE type='card' AND card_id = ?
+        ORDER BY id DESC LIMIT 20
+        """,
+        (card[0],)
+    )
+    st.dataframe(df, use_container_width=True)
+
+def page_impostos():
+    st.header("Impostos & Tributos")
+    st.caption("Controle de obrigações (ICMS, ISS, INSS, IRPJ/CSLL etc.) e seus vencimentos.")
+
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        st.markdown("**Cadastrar tributo**")
+        with st.form("form_tax"):
+            name = st.text_input("Nome do tributo", placeholder="ICMS, ISS, INSS, IRPJ/CSLL…")
+            jur = st.selectbox("Esfera", ["Federal", "Estadual", "Municipal"])
+            code = st.text_input("Código/Referência (opcional)")
+            per = st.selectbox("Periodicidade", ["mensal", "trimestral", "anual"])
+            due = st.number_input("Dia de vencimento", min_value=1, max_value=31, value=20)
+            ok = st.form_submit_button("Salvar")
+            if ok and name:
+                exec_sql(
+                    "INSERT INTO taxes (name,jurisdiction,code,periodicity,due_day) VALUES (?,?,?,?,?)",
+                    (name, jur, code, per, int(due)),
+                )
+                st.success("Tributo salvo")
+    with col2:
+        st.markdown("**Tributos cadastrados**")
+        st.dataframe(
+            fetch_df("SELECT id, name as Tributo, jurisdiction as Esfera, periodicity as Periodicidade, due_day as Vencimento FROM taxes ORDER BY name"),
+            use_container_width=True,
+        )
+
+    st.divider()
+    st.subheader("Lançar pagamento/guia")
+    # força conta do usuário se houver
+    force_acc = st.session_state.get("user", {}).get("account_id") if get_setting("auth_enabled", "0") == "1" else None
+    form_lancamento_generico(default_type='tax', label="Novo pagamento de tributo", force_account_id=force_acc)
+
+def page_folha():
+    st.header("Folha & Encargos")
+    st.caption("Registre folha, encargos e gere lançamentos financeiros automaticamente.")
+
+    with st.form("form_payroll"):
+        period = st.text_input("Período (AAAA-MM)", value=datetime.now().strftime("%Y-%m"))
+        emp = st.text_input("Colaborador")
+        gross = st.number_input("Salário Bruto (R$)", min_value=0.0, step=0.01)
+        charges = st.number_input("Encargos (R$)", min_value=0.0, step=0.01, help="INSS patronal, FGTS etc.")
+        benefits = st.number_input("Benefícios (R$)", min_value=0.0, step=0.01)
+        total = gross + charges + benefits
+        st.info(f"Total calculado: {money(total)}")
+        add = st.form_submit_button("Salvar folha deste colaborador")
+        if add and emp:
+            exec_sql(
+                "INSERT INTO payroll (period, employee, gross, charges, benefits, total, paid) VALUES (?,?,?,?,?,?,0)",
+                (period, emp, float(gross), float(charges), float(benefits), float(total)),
+            )
+            # gera lançamento (escopo por conta se houver)
+            force_acc = st.session_state.get("user", {}).get("account_id") if get_setting("auth_enabled", "0") == "1" else None
+            exec_sql(
+                """
+                INSERT INTO transactions (trx_date, type, sector, description, amount, status, origin, account_id)
+                VALUES (?,?,?,?,?,?,?,?)
+                """,
+                (date.today().isoformat(), 'payroll', 'Administrativo', f"Folha {period} - {emp}", float(total), 'planned', 'manual', force_acc),
+            )
+            st.success("Folha salva e lançamento financeiro criado.")
+
+    st.divider()
+    st.subheader("Folhas recentes")
+    st.dataframe(
+        fetch_df("SELECT period as Período, employee as Colaborador, total as Total, paid as Pago FROM payroll ORDER BY id DESC LIMIT 20"),
+        use_container_width=True,
+    )
+
+def page_outras_despesas():
+    st.header("Outras Despesas (Fornecedores & Compras)")
+    st.caption("Lance despesas gerais por setor/centro de custos.")
+    force_acc = st.session_state.get("user", {}).get("account_id") if get_setting("auth_enabled", "0") == "1" else None
+    form_lancamento_generico(default_type='expense', label="Nova despesa", force_account_id=force_acc)
+
+def page_receitas():
+    st.header("Receitas")
+    st.caption("Registre entradas de vendas e outras receitas.")
+    force_acc = st.session_state.get("user", {}).get("account_id") if get_setting("auth_enabled", "0") == "1" else None
+    form_lancamento_generico(default_type='income', label="Nova receita", force_account_id=force_acc)
+
+def page_conciliacao():
+    st.header("Conciliação")
+    st.caption("Marque como conciliado o que já entrou/saiu conforme extrato/fatura.")
+    q = "SELECT id, trx_date as Data, description as Descrição, amount as Valor, status as Status, sector as Setor FROM transactions WHERE 1=1"
+    q, p = scope_filters(q, [])
+    q += " ORDER BY id DESC LIMIT 200"
+    df = fetch_df(q, tuple(p))
+    if df.empty:
+        st.info("Nada para conciliar.")
+        return
+
+    st.dataframe(df, use_container_width=True)
+    ids = st.multiselect("Selecione IDs para marcar como conciliado", df["id"].tolist())
+    if st.button("Marcar selecionados como conciliado") and ids:
+        qmarks = ",".join(["?"] * len(ids))
+        exec_sql(f"UPDATE transactions SET status='reconciled' WHERE id IN ({qmarks})", tuple(ids))
+        st.success("Atualizado!")
+        st.experimental_rerun()
+
+def page_relatorios():
+    st.header("Relatórios")
+    c1, c2, c3, c4 = st.columns(4)
+    dt_ini = c1.date_input("De", value=date(date.today().year, 1, 1))
+    dt_fim = c2.date_input("Até", value=date.today())
+    setor = c3.selectbox("Setor", ["(Todos)", "Administrativo", "Produção", "Comercial", "Logística", "Outros"])
+    tipo = c4.selectbox("Tipo", ["(Todos)", "expense", "income", "tax", "payroll", "card"])
+
+    query = (
+        "SELECT id as ID, trx_date as Data, type as Tipo, sector as Setor, "
+        "description as Descrição, amount as Valor, account_id as Conta, "
+        "attachment_path as Anexo FROM transactions WHERE date(trx_date) BETWEEN ? AND ?"
+    )
+    params = [dt_ini.isoformat(), dt_fim.isoformat()]
+    if setor != "(Todos)":
+        query += " AND (sector = ?)"
+        params.append(setor)
+    if tipo != "(Todos)":
+        query += " AND (type = ?)"
+        params.append(tipo)
+
+    query, params = scope_filters(query, params)
+    query += " ORDER BY date(trx_date)"
+
+    df = fetch_df(query, tuple(params))
+    st.dataframe(df, use_container_width=True)
+    if not df.empty:
+        st.success(f"Total no período filtrado: {money(df['Valor'].sum())}")
+        colx, coly = st.columns(2)
+        with colx:
+            export_excel(df)
+        with coly:
+            export_csv(df)
+
+        # ----- Visualização/Download de Anexos -----
+        st.divider()
+        st.subheader("Anexos")
+        att_df = df.dropna(subset=['Anexo']) if 'Anexo' in df.columns else pd.DataFrame()
+        if att_df.empty:
+            st.info("Nenhum lançamento com anexo no filtro atual.")
         else:
-            selic_idx = selic_raw
-            try:
-                if not ibov.empty:
-                    ibov_dates = ibov.index.normalize().unique().sort_values()
-                    ibov_dates = ibov_dates[(ibov_dates.date >= selic_start) & (ibov_dates.date <= end)]
-                    if len(ibov_dates) > 0:
-                        selic_idx = selic_raw.reindex(ibov_dates, method="ffill")
-            except Exception:
-                pass
+            sel_id = st.selectbox("Escolha o lançamento para visualizar o anexo", att_df['ID'].tolist())
+            path = att_df.loc[att_df['ID'] == sel_id, 'Anexo'].values[0]
+            show_attachment_ui(str(path))
 
-            mini_card("SELIC (índice base 100)", selic_idx, y_label="Índice",
-                      start_date=selic_start, note="Fonte: BCB/SGS 1178 (SELIC diária, anualizada base 252)",
-                      width_px=260, height_px=160)
+# ---------------------- Main / Navegação ----------------------
+def main():
+    init_db()
+    seed_minimums()
+
+    with st.sidebar:
+        st.markdown("## FinApp")
+        st.caption("Selecione uma área:")
+        page = st.selectbox(
+            "Navegação",
+            [
+                "Dashboard",
+                "Extratos Bancários",
+                "Cartões de Crédito",
+                "Impostos & Tributos",
+                "Folha & Encargos",
+                "Outras Despesas",
+                "Receitas",
+                "Conciliação",
+                "Relatórios",
+            ],
+            index=0,
+        )
+
+        st.divider()
+        st.markdown("**Autenticação (opcional)**")
+        auth_flag = get_setting("auth_enabled", "0")
+        new_flag = st.checkbox("Exigir login", value=(auth_flag == "1"))
+        if new_flag != (auth_flag == "1"):
+            set_setting("auth_enabled", "1" if new_flag else "0")
+            st.experimental_rerun()
+
+    # Se login estiver habilitado, exigir autenticação antes das páginas
+    if get_setting("auth_enabled", "0") == "1":
+        if not login_widget():
+            return
+
+    if page == "Dashboard":
+        page_dashboard()
+    elif page == "Extratos Bancários":
+        page_extratos_bancarios()
+    elif page == "Cartões de Crédito":
+        page_cartoes_credito()
+    elif page == "Impostos & Tributos":
+        page_impostos()
+    elif page == "Folha & Encargos":
+        page_folha()
+    elif page == "Outras Despesas":
+        page_outras_despesas()
+    elif page == "Receitas":
+        page_receitas()
+    elif page == "Conciliação":
+        page_conciliacao()
+    elif page == "Relatórios":
+        page_relatorios()
+    else:
+        page_dashboard()
+
+if __name__ == "__main__":
+    main()
