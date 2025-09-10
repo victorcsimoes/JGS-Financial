@@ -1,7 +1,7 @@
-# app.py — FinApp (DEV) com guias, login compacto, botão "+" e faixa rolante com data e USD
+# app.py — FinApp (DEV) | UI air (azul/white), tema claro/escuro automático, Home com pizza + Links Úteis
 # Execução: python -m streamlit run app.py --server.port 8501 --server.fileWatcherType=none
 # Requisitos: streamlit, pandas, openpyxl
-# Opcional p/ dólar: yfinance
+# Opcionais: yfinance (dólar na faixa) e plotly (gráficos)
 
 import os
 import hashlib
@@ -19,15 +19,216 @@ try:
 except Exception:
     yf = None
 
+# --- Gráficos (plotly) ---
+try:
+    import plotly.express as px  # pip install plotly
+except Exception:
+    px = None
+
 # ---------------------- Constantes ----------------------
 BASE_DIR = os.path.dirname(__file__)
 DB_PATH = os.path.join(BASE_DIR, "finapp.db")
 ATTACH_DIR = os.path.join(BASE_DIR, "attachments")
 SQLITE_TIMEOUT = 4.0
-PAGE_TITLE = "FinApp | Pequenas Empresas (DEV)"
+PAGE_TITLE = "FinApp | JVSeps® "
 
 # ---------------------- Config inicial ----------------------
 st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+
+# ====================== Estilos (claro/escuro) ======================
+# Usamos variáveis CSS + overrides para [data-base-theme="dark"]
+st.markdown(
+    """
+    <style>
+    /* ---------- Variáveis padrão (modo CLARO) ---------- */
+    :root{
+        --finapp-bg:#F7FAFF;                 /* fundo claro */
+        --finapp-bg-2:#FFFFFF;               /* cartões */
+        --finapp-primary:#0E2A47;            /* azul escuro */
+        --finapp-primary-2:#0F4C81;          /* azul secundário */
+        --finapp-text:#0d1b2a;               /* texto principal escuro */
+        --finapp-text-soft:#334155;          /* texto secundário */
+        --finapp-border:#e6ebf2;
+        --finapp-shadow:0 6px 18px rgba(14,42,71,0.08);
+        --finapp-radius:16px;
+        --finapp-grad-1:var(--finapp-primary);
+        --finapp-grad-2:var(--finapp-primary-2);
+        --finapp-link:#0F4C81;
+    }
+
+    /* ---------- Overrides (modo ESCURO) ---------- */
+    [data-base-theme="dark"] :root{
+        --finapp-bg:linear-gradient(180deg, #0E2A47 0%, #0F4C81 100%); /* fundo com leve degradê */
+        --finapp-bg-2:rgba(255,255,255,0.06);   /* cartões translúcidos */
+        --finapp-primary:#EAF2FF;               /* texto/realce claro */
+        --finapp-primary-2:#D2E6FF;
+        --finapp-text:#F3F7FF;
+        --finapp-text-soft:#D8E6FF;
+        --finapp-border:rgba(255,255,255,0.15);
+        --finapp-shadow:0 8px 28px rgba(0,0,0,0.35);
+        --finapp-grad-1:#10355E;
+        --finapp-grad-2:#0F4C81;
+        --finapp-link:#D6E8FF;
+    }
+
+    /* ---------- Base ---------- */
+    .stApp {
+        background: var(--finapp-bg);
+    }
+    .block-container { padding-top: 0.6rem; max-width: 1240px; }
+
+    h1,h2,h3,h4,h5,h6 { color: var(--finapp-primary); letter-spacing:.2px; }
+    .markdown-text-container, .stMarkdown, p, label, span, div {
+        color: var(--finapp-text);
+    }
+    .finapp-muted { color: var(--finapp-text-soft); }
+
+    a, .stMarkdown a { color: var(--finapp-link) !important; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* ---------- Marquee/top bar ---------- */
+    .finapp-marquee {
+        width: 100%;
+        overflow: hidden;
+        white-space: nowrap;
+        box-sizing: border-box;
+        color: #ffffff;
+        font-weight: 700;
+        padding: 10px 0;
+        border-radius: 0 0 14px 14px;
+        background: linear-gradient(90deg, var(--finapp-grad-1), var(--finapp-grad-2));
+        box-shadow: var(--finapp-shadow);
+        margin-bottom: 14px;
+    }
+    .finapp-marquee span {
+        display: inline-block;
+        padding-left: 100%;
+        animation: finapp-scroll-left 22s linear infinite;
+    }
+    @keyframes finapp-scroll-left {
+        0%   { transform: translateX(0); }
+        100% { transform: translateX(-100%); }
+    }
+
+    /* ---------- Cards ---------- */
+    .finapp-card {
+        background: var(--finapp-bg-2);
+        border: 1px solid var(--finapp-border);
+        border-radius: var(--finapp-radius);
+        padding: 16px 18px;
+        box-shadow: var(--finapp-shadow);
+    }
+    .finapp-card h3 { margin: 0 0 8px 0; }
+
+    /* ---------- Botões ---------- */
+    .stButton > button {
+        background: var(--finapp-grad-2);
+        color: #fff;
+        border: 1px solid var(--finapp-grad-2);
+        border-radius: 14px;
+        padding: 8px 14px;
+        font-weight: 700;
+        transition: all .15s ease;
+        box-shadow: var(--finapp-shadow);
+    }
+    .stButton > button:hover {
+        background: var(--finapp-grad-1);
+        border-color: var(--finapp-grad-1);
+        transform: translateY(-1px);
+    }
+
+    /* Botão + */
+    .finapp-plus {
+        display:inline-flex; align-items:center; justify-content:center;
+        width: 40px; height: 40px; border-radius: 12px;
+        background: var(--finapp-bg-2);
+        color: var(--finapp-primary);
+        border:1px solid var(--finapp-border); box-shadow: var(--finapp-shadow);
+        font-size: 22px; font-weight: 800; line-height: 1;
+    }
+    .finapp-plus:hover { filter: brightness(1.06); }
+
+    /* ---------- Inputs ---------- */
+    .stTextInput > div > div > input,
+    .stNumberInput input,
+    .stDateInput input,
+    .stSelectbox > div > div {
+        background: var(--finapp-bg-2);
+        color: var(--finapp-text) !important;
+        border-radius: 12px !important;
+        border: 1px solid var(--finapp-border);
+        box-shadow: none;
+    }
+    .stTextInput label, .stNumberInput label, .stDateInput label, .stSelectbox label { color: var(--finapp-text); }
+
+    /* Placeholder visível no escuro */
+    ::placeholder { color: var(--finapp-text-soft); opacity: 0.9; }
+
+    /* ---------- Métricas ---------- */
+    [data-testid="stMetric"] {
+        background: var(--finapp-bg-2);
+        border: 1px solid var(--finapp-border);
+        border-radius: 14px;
+        padding: 10px 12px;
+        box-shadow: var(--finapp-shadow);
+        color: var(--finapp-primary);
+    }
+
+    /* ---------- Tabs ---------- */
+    .stTabs [data-baseweb="tab-list"] { gap: 6px; background: transparent; flex-wrap: wrap; }
+    .stTabs [data-baseweb="tab"]{
+        height: 42px;
+        border-radius: 12px;
+        padding: 8px 14px;
+        background: var(--finapp-bg-2);
+        border: 1px solid var(--finapp-border);
+        color: var(--finapp-primary);
+        box-shadow: var(--finapp-shadow);
+    }
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(90deg, var(--finapp-grad-1), var(--finapp-grad-2));
+        color: #fff !important;
+        border-color: transparent;
+    }
+
+    /* ---------- Dataframe ---------- */
+    .stDataFrame { border: 1px solid var(--finapp-border); border-radius: 12px; box-shadow: var(--finapp-shadow); }
+
+    /* ---------- Sidebar ---------- */
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(180deg, var(--finapp-grad-1) 0%, var(--finapp-grad-2) 100%) !important;
+    }
+    section[data-testid="stSidebar"] * { color: #e6edf7 !important; }
+    section[data-testid="stSidebar"] .stButton>button {
+        background: #ffffff22; border-color: #ffffff33;
+    }
+    section[data-testid="stSidebar"] .stButton>button:hover {
+        background: #ffffff33; transform: none;
+    }
+
+    /* ---------- Grids responsivos ---------- */
+    .finapp-grid {
+        display: grid;
+        gap: 14px;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        align-items: stretch;
+    }
+    .finapp-grid-2 {
+        display: grid;
+        gap: 14px;
+        grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+        align-items: stretch;
+    }
+
+    /* Títulos reduzidos em telas menores */
+    @media (max-width: 640px){
+        h1,h2 { font-size: 1.3rem; }
+        .finapp-marquee { font-size: 0.95rem; }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 def do_rerun():
     try:
@@ -37,6 +238,14 @@ def do_rerun():
             st.experimental_rerun()
         except Exception:
             pass
+
+# Detecta tema para ajustar gráficos (plotly)
+def current_theme_base() -> str:
+    try:
+        base = st.get_option("theme.base")
+        return base if base in ("light", "dark") else "light"
+    except Exception:
+        return "light"
 
 # ====================== DB helpers ======================
 def _connect() -> sqlite3.Connection:
@@ -260,42 +469,13 @@ def top_ticker():
     usd = get_usd_brl()
     usd_txt = f"Dólar: R$ {usd:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") if usd else "Dólar: n/d"
     msg = f"{hoje}  •  {usd_txt}  •  Finapp® | todos os direitos reservados."
-
-    st.markdown(
-        """
-        <style>
-        .marquee {
-            width: 100%;
-            overflow: hidden;
-            white-space: nowrap;
-            box-sizing: border-box;
-            border-bottom: 1px solid #e5e7eb;
-            color: #111827;
-            font-weight: 600;
-            padding: 6px 0;
-        }
-        .marquee span {
-            display: inline-block;
-            padding-left: 100%;
-            animation: scroll-left 18s linear infinite;
-        }
-        @keyframes scroll-left {
-            0%   { transform: translateX(0); }
-            100% { transform: translateX(-100%); }
-        }
-        .plus-box { display:flex; align-items:center; gap:8px; }
-        .plus-icon { font-size: 22px; color: #16a34a; line-height:1; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown(f'<div class="marquee"><span>{msg} &nbsp; • &nbsp; {msg}</span></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="finapp-marquee"><span>{msg} &nbsp; • &nbsp; {msg}</span></div>', unsafe_allow_html=True)
 
 # ====================== Login & Cadastro (compacto) ======================
 def signup_widget():
     if "user" in st.session_state:
         return
-    with st.sidebar.expander("🆕 Cadastro rápido"):
+    with st.sidebar.expander("🆕 Cadastro rápido", expanded=False):
         name = st.text_input("Nome completo", key="su_name")
         email = st.text_input("Email", key="su_email")
         pwd = st.text_input("Senha", type="password", key="su_pwd")
@@ -314,7 +494,6 @@ def signup_widget():
                         "INSERT INTO users (name,email,password_hash,role,account_id,sectors,is_active) VALUES (?,?,?,?,?,?,1)",
                         (name.strip(), email.strip().lower(), hash_password(pwd), "user", None, "",)
                     )
-                    # Auto-login
                     user_id = int(fetch_df("SELECT id FROM users WHERE email=?", (email.strip().lower(),)).iloc[0]["id"])
                     st.session_state["user"] = {
                         "id": user_id,
@@ -349,7 +528,6 @@ def login_widget() -> bool:
                 st.sidebar.error("Credenciais inválidas.")
         return False
 
-    # Compacto após login
     u = st.session_state["user"]
     with st.sidebar.container():
         st.markdown(f"**{u['name']}**\n\n`{u['email']}`")
@@ -358,8 +536,8 @@ def login_widget() -> bool:
             do_rerun()
     return True
 
-# ====================== Componentes de conteúdo ======================
-def kpis_overview():
+# ====================== KPIs (sem tabela) ======================
+def kpis_cards():
     base = (
         "SELECT "
         "SUM(CASE WHEN type IN ('expense','tax','payroll','card') THEN amount ELSE 0 END) AS total_desp, "
@@ -372,25 +550,17 @@ def kpis_overview():
     total_rec  = float(df_kpi.iloc[0]["total_rec"]  or 0) if not df_kpi.empty else 0.0
     saldo = total_rec - total_desp
 
+    st.markdown('<div class="finapp-card">', unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
     c1.metric("Receitas", money(total_rec))
     c2.metric("Despesas", money(total_desp))
     c3.metric("Saldo", money(saldo))
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    st.divider()
-    st.subheader("Últimos lançamentos")
-    q = """
-        SELECT t.id, t.trx_date as Data, t.type as Tipo, t.description as Descrição, t.amount as Valor,
-               (SELECT name FROM categories c WHERE c.id = t.category_id) as Categoria,
-               t.sector as Setor, t.status as Status
-        FROM transactions t WHERE 1=1
-    """
-    q, p = scope_filters(q, [])
-    q += " ORDER BY t.id DESC LIMIT 10"
-    st.dataframe(fetch_df(q, tuple(p)), use_container_width=True)
-
+# ====================== Formulário genérico ======================
 def form_lancamento_generico(default_type: str = 'expense', label: str = "Novo lançamento", force_account_id: Optional[int] = None):
-    st.markdown(f"**{label}**")
+    st.markdown(f"### {label}")
+    st.markdown('<div class="finapp-card">', unsafe_allow_html=True)
     with st.form(f"form_{label}_{default_type}"):
         c1, c2, c3 = st.columns(3)
         dt_val = c1.date_input("Data", value=date.today())
@@ -464,9 +634,11 @@ def form_lancamento_generico(default_type: str = 'expense', label: str = "Novo l
                 )
                 st.success("Lançamento salvo com sucesso.")
                 do_rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
 def tabela_lancamentos_filtro():
     st.markdown("### Filtro de lançamentos")
+    st.markdown('<div class="finapp-card">', unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
     dt_ini = c1.date_input("De", value=date(date.today().year, 1, 1))
     dt_fim = c2.date_input("Até", value=date.today())
@@ -510,20 +682,158 @@ def tabela_lancamentos_filtro():
                 show_attachment_ui(str(path.iloc[0, 0]))
             else:
                 st.info("Este lançamento não possui anexo salvo.")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # ====================== Páginas ======================
+def page_home():
+    st.markdown("## Home")
+
+    # KPIs (sem tabela)
+    kpis_cards()
+
+    # ----- Parte inferior: dashboards (gráficos pizza) -----
+    st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
+    st.subheader("Dashboards")
+    ctheme = current_theme_base()
+    palette_light = ["#0F4C81","#1E88E5","#90CAF9","#1565C0","#64B5F6","#1976D2","#42A5F5","#5E81AC","#81A1C1"]
+    palette_dark  = ["#D6E8FF","#9CC3FF","#7FB2FF","#B9D6FF","#EAF2FF","#A9C8FF","#C9DEFF","#E1EEFF","#F6FAFF"]
+    palette = palette_dark if ctheme == "dark" else palette_light
+    tpl = "plotly_dark" if ctheme == "dark" else "plotly_white"
+    paper_bg = "rgba(0,0,0,0)"  # deixa o fundo do gráfico integrar com o card
+
+    # Despesas por Categoria
+    q_desp = """
+        SELECT
+            COALESCE((SELECT name FROM categories c WHERE c.id = t.category_id),'(sem categoria)') as Categoria,
+            SUM(t.amount) as Total
+        FROM transactions t
+        WHERE t.type IN ('expense','tax','payroll','card')
+        GROUP BY Categoria
+        ORDER BY Total DESC
+    """
+    q_desp, p_desp = scope_filters(q_desp, [])
+    df_desp = fetch_df(q_desp, tuple(p_desp))
+
+    # Receitas por Categoria
+    q_rec = """
+        SELECT
+            COALESCE((SELECT name FROM categories c WHERE c.id = t.category_id),'(sem categoria)') as Categoria,
+            SUM(t.amount) as Total
+        FROM transactions t
+        WHERE t.type = 'income'
+        GROUP BY Categoria
+        ORDER BY Total DESC
+    """
+    q_rec, p_rec = scope_filters(q_rec, [])
+    df_rec = fetch_df(q_rec, tuple(p_rec))
+
+    # Grid responsivo dos gráficos
+    st.markdown('<div class="finapp-grid">', unsafe_allow_html=True)
+    # Card 1: Despesas
+    st.markdown('<div class="finapp-card">', unsafe_allow_html=True)
+    st.markdown("**Despesas por Categoria**")
+    if px and not df_desp.empty and df_desp["Total"].sum() > 0:
+        fig1 = px.pie(df_desp, names="Categoria", values="Total", hole=0.35,
+                      color_discrete_sequence=palette)
+        fig1.update_traces(textposition='inside', textinfo='percent+label')
+        fig1.update_layout(template=tpl, paper_bgcolor=paper_bg, plot_bgcolor=paper_bg,
+                           margin=dict(t=20,b=12,l=12,r=12))
+        st.plotly_chart(fig1, use_container_width=True)
+    elif df_desp.empty:
+        st.info("Sem dados de despesas para exibir.")
+    else:
+        st.dataframe(df_desp, use_container_width=True)
+        st.caption("Instale o plotly para ver o gráfico: pip install plotly")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Card 2: Receitas
+    st.markdown('<div class="finapp-card">', unsafe_allow_html=True)
+    st.markdown("**Receitas por Categoria**")
+    if px and not df_rec.empty and df_rec["Total"].sum() > 0:
+        fig2 = px.pie(df_rec, names="Categoria", values="Total", hole=0.35,
+                      color_discrete_sequence=palette)
+        fig2.update_traces(textposition='inside', textinfo='percent+label')
+        fig2.update_layout(template=tpl, paper_bgcolor=paper_bg, plot_bgcolor=paper_bg,
+                           margin=dict(t=20,b=12,l=12,r=12))
+        st.plotly_chart(fig2, use_container_width=True)
+    elif df_rec.empty:
+        st.info("Sem dados de receitas para exibir.")
+    else:
+        st.dataframe(df_rec, use_container_width=True)
+        st.caption("Instale o plotly para ver o gráfico: pip install plotly")
+    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)  # fim grid dashboards
+
+    # ----- Links Úteis (responsivo) -----
+    st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
+    st.subheader("Links úteis")
+    st.markdown('<div class="finapp-grid-2">', unsafe_allow_html=True)
+
+    # WhatsApp (link genérico; depois você envia o que preferir)
+    st.markdown(
+        """
+        <div class="finapp-card">
+          <div style="display:flex;align-items:center;gap:12px;">
+            <div style="width:40px;height:40px;border-radius:10px;background:#25D366;display:flex;align-items:center;justify-content:center;color:white;font-weight:900;">
+              W
+            </div>
+            <div>
+              <div style="font-weight:700;">WhatsApp</div>
+              <div class="finapp-muted" style="font-size:0.95rem;">Abrir WhatsApp Web</div>
+            </div>
+          </div>
+          <div style="margin-top:10px;">
+            <a href="https://web.whatsapp.com" target="_blank" rel="noopener">Abrir no navegador</a>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Receita Federal
+    st.markdown(
+        """
+        <div class="finapp-card">
+          <div style="display:flex;align-items:center;gap:12px;">
+            <div style="width:40px;height:40px;border-radius:10px;background:linear-gradient(90deg,#0E2A47,#0F4C81);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;">
+              RF
+            </div>
+            <div>
+              <div style="font-weight:700;">Receita Federal</div>
+              <div class="finapp-muted" style="font-size:0.95rem;">Portal oficial do Governo</div>
+            </div>
+          </div>
+          <div style="margin-top:10px;">
+            <a href="https://www.gov.br/receitafederal/pt-br" target="_blank" rel="noopener">Acessar Receita Federal</a>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Placeholder para futuros links
+    st.markdown(
+        """
+        <div class="finapp-card">
+          <div style="font-weight:700;">Outro Link Útil</div>
+          <div class="finapp-muted" style="margin-top:4px;">Adicionaremos aqui quando você enviar.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
 def page_receitas_despesas():
     st.markdown("## Receitas e Despesas")
+    top_left, top_right = st.columns([0.15, 0.85])
+    with top_left:
+        if st.button("➕ Novo", help="Atalho para incluir um lançamento"):
+            st.session_state["tab_index"] = 1  # guia 'Receitas e Despesas'
+    with top_right:
+        st.markdown('<span class="finapp-muted">Inclua receitas, despesas, impostos, folha e cartão.</span>', unsafe_allow_html=True)
 
-    ctop1, ctop2 = st.columns([1, 3])
-    with ctop1:
-        if st.button("➕ Novo lançamento", help="Atalho para incluir um lançamento"):
-            st.session_state["tab_index"] = 0  # permanece na mesma aba e rola até os formulários
-    with ctop2:
-        pass
-
-    st.divider()
-    st.markdown("### Lançar")
+    st.markdown('<div style="height:6px"></div>', unsafe_allow_html=True)
     c1, c2 = st.columns(2)
     with c1:
         form_lancamento_generico(default_type="expense", label="Despesa")
@@ -533,19 +843,21 @@ def page_receitas_despesas():
         form_lancamento_generico(default_type="income", label="Receita")
         form_lancamento_generico(default_type="card", label="Lançamento de Cartão")
 
-    st.divider()
+    st.markdown('<div style="height:10px"></div>', unsafe_allow_html=True)
     tabela_lancamentos_filtro()
 
 def page_extratos():
     st.markdown("## Extratos")
+    st.markdown('<div class="finapp-card">', unsafe_allow_html=True)
     accs = fetch_df("SELECT id, name, type FROM accounts ORDER BY name")
     if accs.empty:
         st.info("Cadastre ao menos uma conta em 'accounts' (seed já inclui duas).")
+        st.markdown('</div>', unsafe_allow_html=True)
         return
 
     nomes = [(int(r.id), f"{r.name} ({r.type})") for _, r in accs.iterrows()]
-    acc_id, acc_label = st.selectbox("Conta", options=nomes, format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-    acc_id = acc_id if isinstance(acc_id, int) else acc_id[0]
+    acc_sel = st.selectbox("Conta", options=nomes, index=0, format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+    acc_id = acc_sel if isinstance(acc_sel, int) else acc_sel[0]
 
     q = """
         SELECT t.id, t.trx_date as Data, t.type as Tipo, t.description as Descrição, t.amount as Valor,
@@ -563,9 +875,11 @@ def page_extratos():
         saidas = df.loc[df["Tipo"] != "income", "Valor"].sum()
         saldo = float(entradas - saidas)
     st.metric("Saldo estimado da conta", money(saldo))
+    st.markdown('</div>', unsafe_allow_html=True)
 
 def page_conciliacao():
     st.markdown("## Conciliação")
+    st.markdown('<div class="finapp-card">', unsafe_allow_html=True)
     st.info("Módulo simples para marcar lançamentos como conciliados.")
     ids_df = fetch_df("""
         SELECT id, trx_date as Data, description as Descrição, amount as Valor, status as Status
@@ -576,6 +890,7 @@ def page_conciliacao():
     """)
     if ids_df.empty:
         st.success("Não há lançamentos pendentes para conciliar.")
+        st.markdown('</div>', unsafe_allow_html=True)
         return
 
     st.dataframe(ids_df, use_container_width=True)
@@ -588,11 +903,13 @@ def page_conciliacao():
             do_rerun()
         else:
             st.error("ID não encontrado na lista acima.")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 def page_relatorios():
     st.markdown("## Relatórios e Dashboard")
-    kpis_overview()
+    kpis_cards()
 
+    st.markdown('<div class="finapp-card">', unsafe_allow_html=True)
     st.subheader("Resumo por Categoria")
     q = """
         SELECT
@@ -612,18 +929,19 @@ def page_relatorios():
         export_excel(dfc, "resumo_categoria.xlsx")
     with col2:
         export_csv(dfc, "resumo_categoria.csv")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # ====================== Layout principal ======================
 def main():
     init_db()
     seed_minimums()
-    top_ticker()
+    top_ticker()  # Faixa no topo (todas as páginas)
 
-    # Barra superior com botão "+"
-    ctop1, ctop2 = st.columns([0.1, 0.9])
+    # Barra superior com título e botão "+"
+    ctop1, ctop2 = st.columns([0.08, 0.92])
     with ctop1:
         if st.button("➕", help="Adicionar lançamento (vai para 'Receitas e Despesas')"):
-            st.session_state["tab_index"] = 0
+            st.session_state["tab_index"] = 1  # Home=0, Receitas=1
     with ctop2:
         st.markdown(f"### {PAGE_TITLE}")
 
@@ -633,19 +951,85 @@ def main():
     if not logged:
         st.stop()
 
-    # Controle de guia ativa
     if "tab_index" not in st.session_state:
-        st.session_state["tab_index"] = 0
+        st.session_state["tab_index"] = 0  # Home
 
-    tabs = st.tabs(["Receitas e Despesas", "Extratos", "Conciliação", "Relatórios e Dashboard"])
+    tabs = st.tabs(["Home", "Receitas e Despesas", "Extratos", "Conciliação", "Relatórios e Dashboard"])
     with tabs[0]:
-        page_receitas_despesas()
+        page_home()
     with tabs[1]:
-        page_extratos()
+        page_receitas_despesas()
     with tabs[2]:
-        page_conciliacao()
+        page_extratos()
     with tabs[3]:
+        page_conciliacao()
+    with tabs[4]:
         page_relatorios()
+
+# === FINAPP-SIDEBAR-PATCH-2025-09-10 (começo) ===
+st.markdown(
+    """
+    <style>
+    /* Alvos compatíveis com versões diferentes do Streamlit (section/aside) */
+    /* MODO CLARO — fundo azul claro (mesmo tom usado no "app/admin") */
+    section[data-testid="stSidebar"] input[type="text"],
+    section[data-testid="stSidebar"] input[type="password"],
+    aside[aria-label="sidebar"] input[type="text"],
+    aside[aria-label="sidebar"] input[type="password"] {
+      background: #EAF2FF !important;      /* troque por #9CC3FF se quiser mais saturado */
+      color: #0E2A47 !important;
+      border: 1px solid #D2E6FF !important;
+      border-radius: 12px !important;
+    }
+    /* Selectbox do "app/admin" com a mesma cor */
+    section[data-testid="stSidebar"] .stSelectbox > div > div,
+    aside[aria-label="sidebar"] .stSelectbox > div > div {
+      background: #EAF2FF !important;
+      color: #0E2A47 !important;
+      border: 1px solid #D2E6FF !important;
+      border-radius: 12px !important;
+    }
+    /* Foco sutil no claro */
+    section[data-testid="stSidebar"] input[type="text"]:focus,
+    section[data-testid="stSidebar"] input[type="password"]:focus,
+    section[data-testid="stSidebar"] .stSelectbox > div > div:focus-within,
+    aside[aria-label="sidebar"] input[type="text"]:focus,
+    aside[aria-label="sidebar"] input[type="password"]:focus,
+    aside[aria-label="sidebar"] .stSelectbox > div > div:focus-within {
+      outline: 2px solid #9CC3FF !important;
+      outline-offset: 0;
+    }
+
+    /* MODO ESCURO — azul mais escuro e texto claro */
+    [data-base-theme="dark"] section[data-testid="stSidebar"] input[type="text"],
+    [data-base-theme="dark"] section[data-testid="stSidebar"] input[type="password"],
+    [data-base-theme="dark"] aside[aria-label="sidebar"] input[type="text"],
+    [data-base-theme="dark"] aside[aria-label="sidebar"] input[type="password"] {
+      background: #10355E !important;
+      color: #EAF2FF !important;
+      border: 1px solid #275B8F !important;
+    }
+    [data-base-theme="dark"] section[data-testid="stSidebar"] .stSelectbox > div > div,
+    [data-base-theme="dark"] aside[aria-label="sidebar"] .stSelectbox > div > div {
+      background: #10355E !important;
+      color: #EAF2FF !important;
+      border: 1px solid #275B8F !important;
+      border-radius: 12px !important;
+    }
+    [data-base-theme="dark"] section[data-testid="stSidebar"] input[type="text"]:focus,
+    [data-base-theme="dark"] section[data-testid="stSidebar"] input[type="password"]:focus,
+    [data-base-theme="dark"] section[data-testid="stSidebar"] .stSelectbox > div > div:focus-within,
+    [data-base-theme="dark"] aside[aria-label="sidebar"] input[type="text"]:focus,
+    [data-base-theme="dark"] aside[aria-label="sidebar"] input[type="password"]:focus,
+    [data-base-theme="dark"] aside[aria-label="sidebar"] .stSelectbox > div > div:focus-within {
+      outline: 2px solid #9CC3FF !important;
+      outline-offset: 0;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+# === FINAPP-SIDEBAR-PATCH-2025-09-10 (fim) ===
 
 if __name__ == "__main__":
     main()
