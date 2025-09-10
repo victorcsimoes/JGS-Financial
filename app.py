@@ -1,22 +1,30 @@
-# app.py — FinApp (modo ultraestável + fallback DEMO sem banco)
+# app.py — FinApp (DEV) com guias, login compacto, botão "+" e faixa rolante com data e USD
+# Execução: python -m streamlit run app.py --server.port 8501 --server.fileWatcherType=none
 # Requisitos: streamlit, pandas, openpyxl
-# Execução simples: python -m streamlit run app.py --server.port 8501 --server.fileWatcherType=none
-# Dica: se a tela ficar preta, ative o "Modo DEMO (sem banco)" na barra lateral para abrir a UI imediatamente.
+# Opcional p/ dólar: yfinance
 
 import os
 import hashlib
 import sqlite3
-from io import StringIO, BytesIO
+from io import BytesIO
 from datetime import date, datetime
+from typing import Optional, Tuple, List
 
 import pandas as pd
 import streamlit as st
 
+# --- USD opcional (yfinance) ---
+try:
+    import yfinance as yf  # pip install yfinance
+except Exception:
+    yf = None
+
 # ---------------------- Constantes ----------------------
-DB_PATH = "finapp.db"
-ATTACH_DIR = "attachments"
+BASE_DIR = os.path.dirname(__file__)
+DB_PATH = os.path.join(BASE_DIR, "finapp.db")
+ATTACH_DIR = os.path.join(BASE_DIR, "attachments")
 SQLITE_TIMEOUT = 4.0
-PAGE_TITLE = "FinApp | Pequenas Empresas"
+PAGE_TITLE = "FinApp | Pequenas Empresas (DEV)"
 
 # ---------------------- Config inicial ----------------------
 st.set_page_config(page_title=PAGE_TITLE, layout="wide")
@@ -26,89 +34,13 @@ def do_rerun():
         st.rerun()
     except Exception:
         try:
-            st.experimental_rerun()  # compat c/ versões antigas
+            st.experimental_rerun()
         except Exception:
             pass
 
-# ---------------------- Helpers UI ----------------------
-def money(v: float) -> str:
-    try:
-        return (f"R$ {float(v):,.2f}").replace(",", "X").replace(".", ",").replace("X", ".")
-    except Exception:
-        return "R$ 0,00"
-
-def safe_label(x):
-    try:
-        lab = x[1] if isinstance(x, tuple) else x
-        if lab is None or (isinstance(lab, float) and pd.isna(lab)):
-            return "—"
-        return str(lab)
-    except Exception:
-        return "—"
-
-def export_excel(df: pd.DataFrame, filename: str = "relatorio.xlsx"):
-    buf = BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False)
-    st.download_button("⬇️ Exportar Excel", data=buf.getvalue(),
-                       file_name=filename,
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-def export_csv(df: pd.DataFrame, filename: str = "relatorio.csv"):
-    st.download_button("⬇️ Exportar CSV",
-                       data=df.to_csv(index=False).encode("utf-8"),
-                       file_name=filename,
-                       mime="text/csv")
-
-def _read_file_bytes(path: str) -> bytes | None:
-    try:
-        with open(path, "rb") as f:
-            return f.read()
-    except Exception:
-        return None
-
-def show_attachment_ui(path: str):
-    if not path or not os.path.exists(path):
-        st.warning("Anexo não encontrado no disco.")
-        return
-    fname = os.path.basename(path)
-    ext = os.path.splitext(path)[1].lower()
-    data = _read_file_bytes(path)
-    if data is None:
-        st.error("Falha ao abrir o anexo.")
-        return
-    if ext in (".png", ".jpg", ".jpeg"):
-        st.image(data, caption=fname, use_column_width=True)
-    else:
-        st.info("Pré-visualização inline disponível apenas para imagens. Use o botão para baixar o arquivo.")
-    st.download_button("⬇️ Baixar anexo", data=data, file_name=fname)
-
-def header():
-    st.title("FinApp — Controle Financeiro de Pequenas Empresas")
-    st.caption("Lançamentos por setor, conciliação e relatórios, com guias amigáveis.")
-
-def unauth_screen():
-    st.title("FinApp — Acesse pela barra lateral")
-    st.markdown(
-        """
-        **Você ainda não está logado.**
-        1) Crie o **OWNER** na barra lateral (se a base estiver vazia).  
-        2) Faça **login** com email e senha.  
-        Depois de logar, o **Dashboard** aparece aqui.
-        """
-    )
-
-# ---------------------- DB (conexões curtas, sem WAL) ----------------------
+# ====================== DB helpers ======================
 def _connect() -> sqlite3.Connection:
-    """
-    Conexão curta (abre/fecha a cada operação) em modo DELETE (sem -wal/-shm),
-    ajuda a evitar travas no Windows/Antivírus.
-    """
-    conn = sqlite3.connect(
-        DB_PATH,
-        check_same_thread=False,
-        timeout=SQLITE_TIMEOUT,
-    )
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=SQLITE_TIMEOUT)
     try:
         conn.execute("PRAGMA journal_mode=DELETE;")
     except Exception:
@@ -117,15 +49,7 @@ def _connect() -> sqlite3.Connection:
     conn.execute("PRAGMA temp_store=MEMORY;")
     return conn
 
-def db_ready() -> tuple[bool, str]:
-    try:
-        with _connect() as conn:
-            conn.execute("SELECT 1;").fetchone()
-        return True, "ok"
-    except Exception as e:
-        return False, f"{type(e).__name__}: {e}"
-
-def fetch_df(query: str, params: tuple = ()) -> pd.DataFrame:
+def fetch_df(query: str, params: Tuple = ()) -> pd.DataFrame:
     try:
         with _connect() as conn:
             return pd.read_sql_query(query, conn, params=params)
@@ -133,7 +57,7 @@ def fetch_df(query: str, params: tuple = ()) -> pd.DataFrame:
         st.error(f"Erro ao consultar o banco: {e}")
         return pd.DataFrame()
 
-def exec_sql(query: str, params: tuple = ()) -> int | None:
+def exec_sql(query: str, params: Tuple = ()) -> Optional[int]:
     try:
         with _connect() as conn:
             cur = conn.cursor()
@@ -144,6 +68,7 @@ def exec_sql(query: str, params: tuple = ()) -> int | None:
         st.error(f"Erro ao gravar no banco: {e}")
         return None
 
+# ====================== Bootstrap DB ======================
 def hash_password(pwd: str) -> str:
     return hashlib.sha256(pwd.encode("utf-8")).hexdigest()
 
@@ -151,13 +76,6 @@ def init_db():
     os.makedirs(ATTACH_DIR, exist_ok=True)
     with _connect() as conn:
         cur = conn.cursor()
-
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            );
-        """)
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS accounts (
@@ -175,25 +93,6 @@ def init_db():
                 name TEXT NOT NULL,
                 parent_id INTEGER,
                 kind TEXT CHECK(kind IN ('expense','income','tax','payroll')) NOT NULL DEFAULT 'expense'
-            );
-        """)
-
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS cost_centers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL
-            );
-        """)
-
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS cards (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                bank_account_id INTEGER,
-                closing_day INTEGER,
-                due_day INTEGER,
-                credit_limit REAL,
-                FOREIGN KEY(bank_account_id) REFERENCES accounts(id)
             );
         """)
 
@@ -218,11 +117,7 @@ def init_db():
                 tags TEXT,
                 origin TEXT CHECK(origin IN ('manual','bank','card','import')) DEFAULT 'manual',
                 external_id TEXT UNIQUE,
-                attachment_path TEXT,
-                FOREIGN KEY(cost_center_id) REFERENCES cost_centers(id),
-                FOREIGN KEY(category_id) REFERENCES categories(id),
-                FOREIGN KEY(account_id) REFERENCES accounts(id),
-                FOREIGN KEY(card_id) REFERENCES cards(id)
+                attachment_path TEXT
             );
         """)
 
@@ -256,19 +151,13 @@ def init_db():
                 name TEXT NOT NULL,
                 email TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
-                role TEXT CHECK(role IN ('owner','admin','user')) NOT NULL DEFAULT 'user',
+                role TEXT NOT NULL DEFAULT 'user',
                 account_id INTEGER,
                 sectors TEXT,
                 is_active INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(account_id) REFERENCES accounts(id)
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
         """)
-
-        # Migração defensiva: garantir coluna sectors
-        cols = [r[1] for r in cur.execute("PRAGMA table_info(users)").fetchall()]
-        if "sectors" not in cols:
-            cur.execute("ALTER TABLE users ADD COLUMN sectors TEXT")
 
         conn.commit()
 
@@ -289,64 +178,188 @@ def seed_minimums():
         ]
         for n, p, k in base:
             exec_sql("INSERT INTO categories (name,parent_id,kind) VALUES (?,?,?)", (n, p, k))
-    if fetch_df("SELECT COUNT(*) as n FROM cost_centers").iloc[0, 0] == 0:
-        for n in ["Administrativo", "Produção", "Comercial", "Logística"]:
-            exec_sql("INSERT INTO cost_centers (name) VALUES (?)", (n,))
 
-# ---------------------- Login/escopo (DB) ----------------------
-def login_widget_db() -> bool:
-    st.sidebar.markdown("### Entrar")
-    email = st.sidebar.text_input("Email")
-    pwd = st.sidebar.text_input("Senha", type="password")
-    ok = st.sidebar.button("Login")
-    if ok:
-        u = fetch_df("SELECT * FROM users WHERE email = ? AND is_active = 1", (email.strip().lower(),))
-        if not u.empty and u.iloc[0]["password_hash"] == hash_password(pwd):
-            st.session_state["user"] = {
-                "id": int(u.iloc[0]["id"]),
-                "name": u.iloc[0]["name"],
-                "email": u.iloc[0]["email"],
-                "role": u.iloc[0]["role"],
-                "account_id": int(u.iloc[0]["account_id"]) if pd.notna(u.iloc[0]["account_id"]) else None,
-                "sectors": [s.strip() for s in str(u.iloc[0]["sectors"] or "").split(",") if s.strip()],
-            }
-            do_rerun()
-        else:
-            st.sidebar.error("Credenciais inválidas")
+# ====================== Escopo (DEV: sem restrição) ======================
+def scope_filters(base_query: str, params: List) -> Tuple[str, List]:
+    return base_query, params
+
+# ====================== Helpers UI/Export ======================
+def money(v: float) -> str:
+    try:
+        return (f"R$ {float(v):,.2f}").replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return "R$ 0,00"
+
+def safe_label(x):
+    try:
+        lab = x[1] if isinstance(x, tuple) else x
+        if lab is None or (isinstance(lab, float) and pd.isna(lab)):
+            return "—"
+        return str(lab)
+    except Exception:
+        return "—"
+
+def export_excel(df: pd.DataFrame, filename: str = "relatorio.xlsx"):
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False)
+    st.download_button("⬇️ Exportar Excel", data=buf.getvalue(),
+                       file_name=filename,
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+def export_csv(df: pd.DataFrame, filename: str = "relatorio.csv"):
+    st.download_button("⬇️ Exportar CSV",
+                       data=df.to_csv(index=False).encode("utf-8"),
+                       file_name=filename,
+                       mime="text/csv")
+
+def _read_file_bytes(path: str) -> Optional[bytes]:
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except Exception:
+        return None
+
+def show_attachment_ui(path: str):
+    if not path or not os.path.exists(path):
+        st.warning("Anexo não encontrado no disco.")
+        return
+    fname = os.path.basename(path)
+    ext = os.path.splitext(path)[1].lower()
+    data = _read_file_bytes(path)
+    if data is None:
+        st.error("Falha ao abrir o anexo.")
+        return
+    if ext in (".png", ".jpg", ".jpeg"):
+        st.image(data, caption=fname, use_column_width=True)
+    else:
+        st.info("Pré-visualização inline disponível apenas para imagens. Use o botão para baixar o arquivo.")
+    st.download_button("⬇️ Baixar anexo", data=data, file_name=fname)
+
+# ====================== Faixa rolante (data + USD + direitos) ======================
+def get_usd_brl() -> Optional[float]:
+    try:
+        if yf is None:
+            return None
+        t = yf.Ticker("USDBRL=X")
+        p = None
+        try:
+            p = float(getattr(t, "fast_info", {}).get("last_price", None))
+        except Exception:
+            p = None
+        if p is None:
+            hist = t.history(period="1d", auto_adjust=False)
+            if not hist.empty:
+                p = float(hist["Close"].iloc[-1])
+        return p
+    except Exception:
+        return None
+
+def top_ticker():
+    hoje = datetime.now().strftime("%d/%m/%y")
+    usd = get_usd_brl()
+    usd_txt = f"Dólar: R$ {usd:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") if usd else "Dólar: n/d"
+    msg = f"{hoje}  •  {usd_txt}  •  Finapp® | todos os direitos reservados."
+
+    st.markdown(
+        """
+        <style>
+        .marquee {
+            width: 100%;
+            overflow: hidden;
+            white-space: nowrap;
+            box-sizing: border-box;
+            border-bottom: 1px solid #e5e7eb;
+            color: #111827;
+            font-weight: 600;
+            padding: 6px 0;
+        }
+        .marquee span {
+            display: inline-block;
+            padding-left: 100%;
+            animation: scroll-left 18s linear infinite;
+        }
+        @keyframes scroll-left {
+            0%   { transform: translateX(0); }
+            100% { transform: translateX(-100%); }
+        }
+        .plus-box { display:flex; align-items:center; gap:8px; }
+        .plus-icon { font-size: 22px; color: #16a34a; line-height:1; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(f'<div class="marquee"><span>{msg} &nbsp; • &nbsp; {msg}</span></div>', unsafe_allow_html=True)
+
+# ====================== Login & Cadastro (compacto) ======================
+def signup_widget():
     if "user" in st.session_state:
-        u = st.session_state["user"]
-        st.sidebar.success(f"Olá, {u['name']} ({u['role']})")
+        return
+    with st.sidebar.expander("🆕 Cadastro rápido"):
+        name = st.text_input("Nome completo", key="su_name")
+        email = st.text_input("Email", key="su_email")
+        pwd = st.text_input("Senha", type="password", key="su_pwd")
+        pwd2 = st.text_input("Confirmar senha", type="password", key="su_pwd2")
+        if st.button("Criar conta e entrar", key="su_btn"):
+            if not (name and email and pwd and pwd2):
+                st.sidebar.error("Preencha todos os campos.")
+            elif pwd != pwd2:
+                st.sidebar.error("As senhas não coincidem.")
+            else:
+                exists = fetch_df("SELECT id FROM users WHERE email=?", (email.strip().lower(),))
+                if not exists.empty:
+                    st.sidebar.error("Email já cadastrado.")
+                else:
+                    exec_sql(
+                        "INSERT INTO users (name,email,password_hash,role,account_id,sectors,is_active) VALUES (?,?,?,?,?,?,1)",
+                        (name.strip(), email.strip().lower(), hash_password(pwd), "user", None, "",)
+                    )
+                    # Auto-login
+                    user_id = int(fetch_df("SELECT id FROM users WHERE email=?", (email.strip().lower(),)).iloc[0]["id"])
+                    st.session_state["user"] = {
+                        "id": user_id,
+                        "name": name.strip(),
+                        "email": email.strip().lower(),
+                        "role": "user",
+                        "account_id": None,
+                        "sectors": [],
+                    }
+                    st.sidebar.success("Conta criada e login efetuado.")
+                    do_rerun()
+
+def login_widget() -> bool:
+    if "user" not in st.session_state:
+        st.sidebar.markdown("### Entrar")
+        email = st.sidebar.text_input("Email")
+        pwd = st.sidebar.text_input("Senha", type="password")
+        ok = st.sidebar.button("Login")
+        if ok:
+            u = fetch_df("SELECT * FROM users WHERE email = ?", (email.strip().lower(),))
+            if not u.empty and u.iloc[0]["password_hash"] == hash_password(pwd):
+                st.session_state["user"] = {
+                    "id": int(u.iloc[0]["id"]),
+                    "name": u.iloc[0]["name"],
+                    "email": u.iloc[0]["email"],
+                    "role": "user",
+                    "account_id": int(u.iloc[0]["account_id"]) if pd.notna(u.iloc[0]["account_id"]) else None,
+                    "sectors": [s.strip() for s in str(u.iloc[0]["sectors"] or "").split(",") if s.strip()],
+                }
+                do_rerun()
+            else:
+                st.sidebar.error("Credenciais inválidas.")
+        return False
+
+    # Compacto após login
+    u = st.session_state["user"]
+    with st.sidebar.container():
+        st.markdown(f"**{u['name']}**\n\n`{u['email']}`")
         if st.sidebar.button("Sair"):
             del st.session_state["user"]
             do_rerun()
-        return True
-    return False
+    return True
 
-def require_role(min_role: str) -> bool:
-    ranking = {"user": 1, "admin": 2, "owner": 3}
-    if "user" not in st.session_state:
-        st.warning("Faça login para acessar esta seção.")
-        return False
-    return ranking.get(st.session_state["user"]["role"], 1) >= ranking.get(min_role, 1)
-
-def scope_filters(base_query: str, params: list) -> tuple[str, list]:
-    if "user" in st.session_state:
-        role = st.session_state["user"].get("role")
-        if role == "owner":
-            return base_query, params  # OWNER vê tudo
-        acc = st.session_state["user"].get("account_id")
-        sectors = st.session_state["user"].get("sectors", [])
-        if acc:
-            base_query += " AND (account_id IS NULL OR account_id = ?)"
-            params.append(acc)
-        if sectors:
-            placeholders = ",".join(["?"] * len(sectors))
-            base_query += f" AND (sector IS NULL OR sector IN ({placeholders}))"
-            params.extend(sectors)
-    return base_query, params
-
-# ---------------------- Páginas (DB) ----------------------
-def kpis_overview_db():
+# ====================== Componentes de conteúdo ======================
+def kpis_overview():
     base = (
         "SELECT "
         "SUM(CASE WHEN type IN ('expense','tax','payroll','card') THEN amount ELSE 0 END) AS total_desp, "
@@ -369,16 +382,14 @@ def kpis_overview_db():
     q = """
         SELECT t.id, t.trx_date as Data, t.type as Tipo, t.description as Descrição, t.amount as Valor,
                (SELECT name FROM categories c WHERE c.id = t.category_id) as Categoria,
-               (SELECT name FROM cost_centers cc WHERE cc.id = t.cost_center_id) as Centro_de_Custos,
-               t.sector as Setor,
-               t.status as Status
+               t.sector as Setor, t.status as Status
         FROM transactions t WHERE 1=1
     """
     q, p = scope_filters(q, [])
     q += " ORDER BY t.id DESC LIMIT 10"
     st.dataframe(fetch_df(q, tuple(p)), use_container_width=True)
 
-def form_lancamento_generico_db(default_type: str = 'expense', label: str = "Novo lançamento", force_account_id: int | None = None):
+def form_lancamento_generico(default_type: str = 'expense', label: str = "Novo lançamento", force_account_id: Optional[int] = None):
     st.markdown(f"**{label}**")
     with st.form(f"form_{label}_{default_type}"):
         c1, c2, c3 = st.columns(3)
@@ -406,8 +417,7 @@ def form_lancamento_generico_db(default_type: str = 'expense', label: str = "Nov
         cat_options = [(None, "—")] + [(int(r.id), r.name) for _, r in categories_df.iterrows()]
         cat = c5.selectbox("Categoria", options=cat_options, format_func=safe_label)
 
-        allowed_sectors = st.session_state.get("user", {}).get("sectors", []) if "user" in st.session_state else []
-        sector_options = allowed_sectors if allowed_sectors else ["Administrativo", "Produção", "Comercial", "Logística", "Outros"]
+        sector_options = ["Administrativo", "Produção", "Comercial", "Logística", "Outros"]
         sector = c6.selectbox("Setor", sector_options)
 
         c7, c8 = st.columns([2, 1])
@@ -449,461 +459,193 @@ def form_lancamento_generico_db(default_type: str = 'expense', label: str = "Nov
                         None,
                         (cat[0] if isinstance(cat, tuple) else None),
                         account_id_final,
-                        method, doc, party, desc, float(amount), status, 'manual', attach_path
-                    )
+                        method, doc, party, desc, float(amount), status, "manual", attach_path
+                    ),
                 )
-                st.success("Lançamento salvo!")
+                st.success("Lançamento salvo com sucesso.")
                 do_rerun()
 
-def page_dashboard_db():
-    header()
-    kpis_overview_db()
+def tabela_lancamentos_filtro():
+    st.markdown("### Filtro de lançamentos")
+    c1, c2, c3, c4 = st.columns(4)
+    dt_ini = c1.date_input("De", value=date(date.today().year, 1, 1))
+    dt_fim = c2.date_input("Até", value=date.today())
+    tipo = c3.selectbox("Tipo", ["Todos", "income", "expense", "tax", "payroll", "card", "transfer"])
+    status = c4.selectbox("Status", ["Todos", "planned", "paid", "overdue", "reconciled", "canceled"])
 
-def page_extratos_bancarios_db():
-    st.header("Extratos Bancários")
-    st.caption("Importe CSV simples (data, descrição, valor) e classifique rapidamente.")
+    q = """
+        SELECT t.id, t.trx_date as Data, t.type as Tipo, t.description as Descrição, t.amount as Valor,
+               (SELECT name FROM categories c WHERE c.id = t.category_id) as Categoria,
+               (SELECT name FROM accounts a WHERE a.id = t.account_id) as Conta,
+               t.sector as Setor, t.status as Status, t.attachment_path as Anexo
+        FROM transactions t
+        WHERE date(t.trx_date) BETWEEN ? AND ?
+    """
+    params: List = [dt_ini.isoformat(), dt_fim.isoformat()]
+    if tipo != "Todos":
+        q += " AND t.type = ?"
+        params.append(tipo)
+    if status != "Todos":
+        q += " AND t.status = ?"
+        params.append(status)
 
-    accounts_df = fetch_df("SELECT id, name FROM accounts WHERE type='bank'")
-    if not accounts_df.empty:
-        accounts_df["name"] = accounts_df["name"].fillna("—").astype(str)
-    force_acc = st.session_state.get("user", {}).get("account_id") if "user" in st.session_state else None
-    if accounts_df.empty and not force_acc:
-        st.warning("Nenhuma conta bancária cadastrada em Configurações > Contas.")
-        return
+    q, params = scope_filters(q, params)
+    q += " ORDER BY date(t.trx_date) DESC, t.id DESC"
 
-    if force_acc:
-        st.info("Importando para a conta vinculada ao seu usuário.")
-        if not accounts_df.empty and (accounts_df.id == force_acc).any():
-            acc_name = accounts_df.loc[accounts_df.id == force_acc, "name"].iloc[0]
-        else:
-            acc_name = "Conta do Usuário"
-        acc = (force_acc, acc_name)
-    else:
-        acc_options = [(int(r.id), r.name) for _, r in accounts_df.iterrows()]
-        acc = st.selectbox("Conta de destino", acc_options, format_func=safe_label)
-
-    up = st.file_uploader("Arraste o CSV do banco", type=["csv"])
-    if up:
-        try:
-            content = StringIO(up.getvalue().decode("utf-8"))
-            df = pd.read_csv(content)
-        except Exception as e:
-            st.error(f"Erro ao ler CSV: {e}")
-            return
-
-        st.write("Pré-visualização:")
-        st.dataframe(df.head(), use_container_width=True)
-
-        cols = list(df.columns)
-        if not cols:
-            st.warning("CSV sem colunas detectadas.")
-            return
-
-        col_date = st.selectbox("Coluna de Data", cols)
-        col_desc = st.selectbox("Coluna de Descrição", cols, index=min(1, len(cols) - 1))
-        col_val = st.selectbox("Coluna de Valor", cols, index=min(2, len(cols) - 1))
-
-        if st.button("Importar lançamentos"):
-            imp = df[[col_date, col_desc, col_val]].copy()
-            imp.columns = ["date", "desc", "amount"]
-            n_ok = 0
-            for _, r in imp.iterrows():
-                try:
-                    d = pd.to_datetime(r["date"]).date().isoformat()
-                    v = float(r["amount"])
-                    exec_sql(
-                        """
-                        INSERT INTO transactions (trx_date, type, sector, category_id, account_id,
-                                                  method, doc_number, counterparty, description, amount, status, origin)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-                        """,
-                        (
-                            d, 'expense' if v < 0 else 'income', 'Administrativo', None,
-                            acc[0] if isinstance(acc, tuple) else acc,
-                            'extrato', '', '', str(r["desc"]).strip(), abs(v), 'paid', 'bank'
-                        )
-                    )
-                    n_ok += 1
-                except Exception as e:
-                    st.error(f"Falha ao importar uma linha: {e}")
-            st.success(f"Importação concluída: {n_ok} lançamentos")
-            do_rerun()
-
-    st.divider()
-    st.subheader("Lançamentos recentes do banco")
-    q = "SELECT trx_date as Data, description as Descrição, amount as Valor, status as Status, sector as Setor FROM transactions WHERE origin='bank'"
-    q, p = scope_filters(q, [])
-    q += " ORDER BY id DESC LIMIT 20"
-    st.dataframe(fetch_df(q, tuple(p)), use_container_width=True)
-
-def page_cartoes_credito_db():
-    st.header("Cartões de Crédito")
-    st.caption("Controle de faturas, despesas por cartão e conciliação com conta bancária.")
-
-    cards = fetch_df("SELECT id, name FROM cards")
-    if cards.empty:
-        st.info("Nenhum cartão cadastrado. Vá em Configurações > Cartões.")
-        return
-
-    card_options = [(int(r.id), r.name) for _, r in cards.iterrows()]
-    card = st.selectbox("Cartão", card_options, format_func=safe_label)
-
-    st.markdown("**Lançar despesa do cartão**")
-    with st.form("form_card"):
-        dt_val = st.date_input("Data", value=date.today())
-        amount = st.number_input("Valor (R$)", min_value=0.0, step=0.01)
-        desc = st.text_input("Descrição")
-        cat_df = fetch_df("SELECT id, name FROM categories WHERE kind='expense'")
-        cat_options = [(int(r.id), r.name) for _, r in cat_df.iterrows()]
-        cat = st.selectbox("Categoria", cat_options, format_func=safe_label)
-        allowed_sectors = st.session_state.get("user", {}).get("sectors", []) if "user" in st.session_state else []
-        sector_options = allowed_sectors if allowed_sectors else ["Administrativo", "Produção", "Comercial", "Logística", "Outros"]
-        sector = st.selectbox("Setor", sector_options)
-        attach = st.file_uploader("Comprovante (opcional)", type=["pdf", "png", "jpg", "jpeg"], key="card_attach")
-        ok = st.form_submit_button("Salvar")
-        if ok:
-            attach_path = None
-            if attach is not None:
-                fname = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{attach.name}"
-                fpath = os.path.join(ATTACH_DIR, fname)
-                try:
-                    with open(fpath, "wb") as f:
-                        f.write(attach.getbuffer())
-                    attach_path = fpath
-                except Exception as e:
-                    st.error(f"Falha ao salvar anexo: {e}")
-            exec_sql(
-                """
-                INSERT INTO transactions (trx_date, type, card_id, category_id, description, amount, status, method, origin, sector, attachment_path)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
-                """,
-                (dt_val.isoformat(), 'card', card[0], cat[0], desc, float(amount), 'planned', 'cartão', 'card', sector, attach_path)
-            )
-            st.success("Lançado na fatura do cartão.")
-            do_rerun()
-
-    st.divider()
-    st.subheader("Lançamentos do cartão (recentes)")
-    df = fetch_df(
-        """
-        SELECT trx_date as Data, description as Descrição, amount as Valor, status as Status, sector as Setor
-        FROM transactions WHERE type='card' AND card_id = ?
-        ORDER BY id DESC LIMIT 20
-        """,
-        (card[0],)
-    )
+    df = fetch_df(q, tuple(params))
     st.dataframe(df, use_container_width=True)
-
-def page_impostos_db():
-    st.header("Impostos & Tributos")
-    st.caption("Controle de obrigações (ICMS, ISS, INSS, IRPJ/CSLL etc.) e seus vencimentos.")
-
-    col1, col2 = st.columns([1, 1])
+    col1, col2 = st.columns(2)
     with col1:
-        st.markdown("**Cadastrar tributo**")
-        with st.form("form_tax"):
-            name = st.text_input("Nome do tributo", placeholder="ICMS, ISS, INSS, IRPJ/CSLL…")
-            jur = st.selectbox("Esfera", ["Federal", "Estadual", "Municipal"])
-            code = st.text_input("Código/Referência (opcional)")
-            per = st.selectbox("Periodicidade", ["mensal", "trimestral", "anual"])
-            due = st.number_input("Dia de vencimento", min_value=1, max_value=31, value=20)
-            ok = st.form_submit_button("Salvar")
-            if ok and name:
-                exec_sql(
-                    "INSERT INTO taxes (name,jurisdiction,code,periodicity,due_day) VALUES (?,?,?,?,?)",
-                    (name, jur, code, per, int(due)),
-                )
-                st.success("Tributo salvo")
+        export_excel(df, "lancamentos.xlsx")
     with col2:
-        st.markdown("**Tributos cadastrados**")
-        st.dataframe(
-            fetch_df("SELECT id, name as Tributo, jurisdiction as Esfera, periodicity as Periodicidade, due_day as Vencimento FROM taxes ORDER BY name"),
-            use_container_width=True,
-        )
+        export_csv(df, "lancamentos.csv")
 
-    st.divider()
-    st.subheader("Lançar pagamento/guia")
-    force_acc = st.session_state.get("user", {}).get("account_id") if "user" in st.session_state else None
-    form_lancamento_generico_db(default_type='tax', label="Novo pagamento de tributo", force_account_id=force_acc)
-
-def page_folha_db():
-    st.header("Folha & Encargos")
-    st.caption("Registre folha, encargos e gere lançamentos financeiros automaticamente.")
-
-    with st.form("form_payroll"):
-        period = st.text_input("Período (AAAA-MM)", value=datetime.now().strftime("%Y-%m"))
-        emp = st.text_input("Colaborador")
-        gross = st.number_input("Salário Bruto (R$)", min_value=0.0, step=0.01)
-        charges = st.number_input("Encargos (R$)", min_value=0.0, step=0.01, help="INSS patronal, FGTS etc.")
-        benefits = st.number_input("Benefícios (R$)", min_value=0.0, step=0.01)
-        total = gross + charges + benefits
-        st.info(f"Total calculado: {money(total)}")
-        add = st.form_submit_button("Salvar folha deste colaborador")
-        if add and emp:
-            exec_sql(
-                "INSERT INTO payroll (period, employee, gross, charges, benefits, total, paid) VALUES (?,?,?,?,?,?,0)",
-                (period, emp, float(gross), float(charges), float(benefits), float(total)),
-            )
-            force_acc = st.session_state.get("user", {}).get("account_id") if "user" in st.session_state else None
-            exec_sql(
-                """
-                INSERT INTO transactions (trx_date, type, sector, description, amount, status, origin, account_id)
-                VALUES (?,?,?,?,?,?,?,?)
-                """,
-                (date.today().isoformat(), 'payroll', 'Administrativo', f"Folha {period} - {emp}", float(total), 'planned', 'manual', force_acc),
-            )
-            st.success("Folha salva e lançamento financeiro criado.")
-
-    st.divider()
-    st.subheader("Folhas recentes")
-    st.dataframe(
-        fetch_df("SELECT period as Período, employee as Colaborador, total as Total, paid as Pago FROM payroll ORDER BY id DESC LIMIT 20"),
-        use_container_width=True,
-    )
-
-def page_outras_despesas_db():
-    st.header("Outras Despesas (Fornecedores & Compras)")
-    st.caption("Lance despesas gerais por setor/centro de custos.")
-    force_acc = st.session_state.get("user", {}).get("account_id") if "user" in st.session_state else None
-    form_lancamento_generico_db(default_type='expense', label="Nova despesa", force_account_id=force_acc)
-
-def page_receitas_db():
-    st.header("Receitas")
-    st.caption("Registre entradas de vendas e outras receitas.")
-    force_acc = st.session_state.get("user", {}).get("account_id") if "user" in st.session_state else None
-    form_lancamento_generico_db(default_type='income', label="Nova receita", force_account_id=force_acc)
-
-def page_conciliacao_db():
-    st.header("Conciliação")
-    st.caption("Marque como conciliado o que já entrou/saiu conforme extrato/fatura.")
-    q = "SELECT id, trx_date as Data, description as Descrição, amount as Valor, status as Status, sector as Setor FROM transactions WHERE 1=1"
-    q, p = scope_filters(q, [])
-    q += " ORDER BY id DESC LIMIT 200"
-    df = fetch_df(q, tuple(p))
-    if df.empty:
-        st.info("Nada para conciliar.")
-        return
-
-    st.dataframe(df, use_container_width=True)
-    ids = st.multiselect("Selecione IDs para marcar como conciliado", df["id"].tolist())
-    if st.button("Marcar selecionados como conciliado") and ids:
-        qmarks = ",".join(["?"] * len(ids))
-        exec_sql(f"UPDATE transactions SET status='reconciled' WHERE id IN ({qmarks})", tuple(ids))
-        st.success("Atualizado!")
-        do_rerun()
-
-def page_admin_users_db():
-    st.header("Admin: Usuários")
-    if not require_role("admin"):
-        return
-
-    df = fetch_df(
-        """
-        SELECT
-            u.id as ID,
-            u.name as Nome,
-            u.email as Email,
-            u.role as Papel,
-            u.is_active as Ativo,
-            u.account_id as Conta_ID,
-            COALESCE(a.name,'—') as Conta_Nome,
-            COALESCE(u.sectors,'') as Setores,
-            u.created_at as Criado_em
-        FROM users u
-        LEFT JOIN accounts a ON a.id = u.account_id
-        ORDER BY u.id DESC
-        """
-    )
-    st.dataframe(df, use_container_width=True)
-    st.caption("Observação: esta listagem não concede acesso aos lançamentos de outras contas. O escopo continua aplicado para user e admin. Apenas OWNER tem visão completa dos dados financeiros.")
-
-# ---------------------- DEMO (sem banco) ----------------------
-def demo_seed():
-    # dados simples em memória
-    st.session_state.setdefault("demo_user", {"name": "Demo Owner", "role": "owner"})
-    st.session_state.setdefault("demo_accounts", pd.DataFrame([
-        {"id": 1, "name": "Conta Corrente", "type": "bank"},
-        {"id": 2, "name": "Caixa", "type": "cash"},
-    ]))
-    st.session_state.setdefault("demo_tx", pd.DataFrame([
-        {"id": 1, "trx_date": str(date.today()), "type": "income", "sector": "Comercial", "description": "Venda #1001", "amount": 1500.00, "status": "paid"},
-        {"id": 2, "trx_date": str(date.today()), "type": "expense", "sector": "Administrativo", "description": "Energia", "amount": 420.75, "status": "paid"},
-        {"id": 3, "trx_date": str(date.today()), "type": "tax", "sector": "Administrativo", "description": "ICMS", "amount": 230.00, "status": "planned"},
-    ]))
-
-def header_demo():
-    st.title("FinApp (DEMO) — Sem Banco de Dados")
-    st.caption("Este modo ignora SQLite e usa dados fictícios em memória — útil se algo estiver bloqueando o banco de dados na sua máquina.")
-
-def page_dashboard_demo():
-    header_demo()
-    df = st.session_state["demo_tx"]
-    total_rec = float(df.query("type == 'income'")["amount"].sum())
-    total_desp = float(df.query("type != 'income'")["amount"].sum())
-    saldo = total_rec - total_desp
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Receitas", money(total_rec))
-    c2.metric("Despesas", money(total_desp))
-    c3.metric("Saldo", money(saldo))
-    st.divider()
-    st.subheader("Lançamentos (amostra)")
-    st.dataframe(df.rename(columns={
-        "trx_date":"Data","type":"Tipo","description":"Descrição","amount":"Valor","sector":"Setor","status":"Status"
-    }), use_container_width=True)
-    st.info("Modo DEMO: cadastros/lançamentos não são persistidos.")
-
-def router_demo():
-    page = st.sidebar.selectbox("Navegação", [
-        "Dashboard (DEMO)",
-    ], index=0)
-    if page == "Dashboard (DEMO)":
-        page_dashboard_demo()
-
-# ---------------------- Main ----------------------
-def main():
-    # Toggle DEMO (sem banco) — garante UI mesmo se SQLite travar
-    with st.sidebar:
-        st.markdown("## ⚙️ Opções")
-        demo = st.checkbox("Modo DEMO (sem banco)", value=False, help="Se a tela ficar preta/sem resposta, ative este modo para abrir a UI imediatamente (usa dados em memória).")
-
-    if demo:
-        # Sem tocar no banco: UI imediata
-        demo_seed()
-        router_demo()
-        return
-
-    # ---- Modo normal com banco ----
-    ok, msg = db_ready()
-    if not ok:
-        st.error(f"Banco de dados indisponível: {msg}")
-        st.info("Ative o **Modo DEMO (sem banco)** na barra lateral para abrir a UI agora mesmo.")
-        return
-
-    try:
-        init_db()
-        seed_minimums()
-    except Exception as e:
-        st.error(f"Falha ao iniciar o banco de dados: {e}")
-        st.info("Ative o **Modo DEMO (sem banco)** na barra lateral para abrir a UI agora mesmo.")
-        return
-
-    # Se não houver usuários, mostrar bootstrap na sidebar
-    def _users_count() -> int:
-        df = fetch_df("SELECT COUNT(*) as n FROM users")
-        return int(df.iloc[0, 0]) if not df.empty else 0
-
-    def create_initial_owner_ui() -> None:
-        st.sidebar.warning("Configuração inicial: crie o usuário OWNER (acesso total).")
-        with st.sidebar.form("form_first_owner"):
-            name = st.text_input("Nome")
-            email = st.text_input("Email (login)")
-            pwd = st.text_input("Senha", type="password")
-            acc_df = fetch_df("SELECT id, name FROM accounts ORDER BY name")
-            acc_opts = [(None, "—")] + ([(int(r.id), r.name) for _, r in acc_df.iterrows()] if not acc_df.empty else [])
-            acc_sel = st.selectbox("Conta padrão (opcional)", acc_opts, format_func=safe_label)
-            sectors_csv = st.text_input("Setores (CSV, opcional)", placeholder="Administrativo,Produção")
-            okbtn = st.form_submit_button("Criar OWNER")
-            if okbtn:
-                if not (name and email and pwd):
-                    st.sidebar.error("Preencha nome, email e senha.")
-                else:
-                    exec_sql(
-                        "INSERT INTO users (name,email,password_hash,role,account_id,sectors,is_active) VALUES (?,?,?,?,?,?,1)",
-                        (
-                            name.strip(),
-                            email.strip().lower(),
-                            hash_password(pwd),
-                            "owner",
-                            acc_sel[0] if isinstance(acc_sel, tuple) else None,
-                            sectors_csv.strip(),
-                        ),
-                    )
-                    st.sidebar.success("OWNER criado. Faça login com este usuário.")
-                    do_rerun()
-
-    if _users_count() == 0:
-        create_initial_owner_ui()
-
-    logged = login_widget_db()
-    if not logged:
-        unauth_screen()
-        return
-
-    role = st.session_state["user"]["role"]
-    with st.sidebar:
-        st.markdown("## FinApp")
-        st.caption("Selecione uma área:")
-        pages = [
-            "Dashboard",
-            "Extratos Bancários",
-            "Cartões de Crédito",
-            "Impostos & Tributos",
-            "Folha & Encargos",
-            "Outras Despesas",
-            "Receitas",
-            "Conciliação",
-            "Relatórios",
-        ]
-        if role in ("admin", "owner"):
-            pages.append("Admin: Usuários")
-        page = st.selectbox("Navegação", pages, index=0)
-
-    if page == "Dashboard":
-        page_dashboard_db()
-    elif page == "Extratos Bancários":
-        page_extratos_bancarios_db()
-    elif page == "Cartões de Crédito":
-        page_cartoes_credito_db()
-    elif page == "Impostos & Tributos":
-        page_impostos_db()
-    elif page == "Folha & Encargos":
-        page_folha_db()
-    elif page == "Outras Despesas":
-        page_outras_despesas_db()
-    elif page == "Receitas":
-        page_receitas_db()
-    elif page == "Conciliação":
-        page_conciliacao_db()
-    elif page == "Relatórios":
-        # relatório rápido (mesma lógica anterior, reusada)
-        st.header("Relatórios")
-        c1, c2, c3, c4 = st.columns(4)
-        dt_ini = c1.date_input("De", value=date(date.today().year, 1, 1))
-        dt_fim = c2.date_input("Até", value=date.today())
-        setor = c3.selectbox("Setor", ["(Todos)", "Administrativo", "Produção", "Comercial", "Logística", "Outros"])
-        tipo = c4.selectbox("Tipo", ["(Todos)", "expense", "income", "tax", "payroll", "card"])
-        query = (
-            "SELECT id as ID, trx_date as Data, type as Tipo, sector as Setor, "
-            "description as Descrição, amount as Valor, account_id as Conta, "
-            "attachment_path as Anexo FROM transactions WHERE date(trx_date) BETWEEN ? AND ?"
-        )
-        params = [dt_ini.isoformat(), dt_fim.isoformat()]
-        if setor != "(Todos)":
-            query += " AND (sector = ?)"; params.append(setor)
-        if tipo != "(Todos)":
-            query += " AND (type = ?)"; params.append(tipo)
-        query, params = scope_filters(query, params)
-        query += " ORDER BY date(trx_date)"
-        df = fetch_df(query, tuple(params))
-        st.dataframe(df, use_container_width=True)
-        if not df.empty:
-            st.success(f"Total no período filtrado: {money(df['Valor'].sum())}")
-            colx, coly = st.columns(2)
-            with colx: export_excel(df)
-            with coly: export_csv(df)
-            st.divider()
-            st.subheader("Anexos")
-            att_df = df.dropna(subset=['Anexo']) if 'Anexo' in df.columns else pd.DataFrame()
-            if att_df.empty:
-                st.info("Nenhum lançamento com anexo no filtro atual.")
+    st.caption("Clique em um ID abaixo para visualizar o anexo, se houver.")
+    ids = df["id"].tolist() if not df.empty else []
+    if ids:
+        id_sel = st.selectbox("ID do lançamento", options=ids)
+        if id_sel:
+            path = fetch_df("SELECT attachment_path FROM transactions WHERE id=?", (id_sel,))
+            if not path.empty and pd.notna(path.iloc[0, 0]) and str(path.iloc[0, 0]).strip():
+                show_attachment_ui(str(path.iloc[0, 0]))
             else:
-                sel_id = st.selectbox("Escolha o lançamento para visualizar o anexo", att_df['ID'].tolist())
-                path = att_df.loc[att_df['ID'] == sel_id, 'Anexo'].values[0]
-                show_attachment_ui(str(path))
-    elif page == "Admin: Usuários":
-        page_admin_users_db()
-    else:
-        page_dashboard_db()
+                st.info("Este lançamento não possui anexo salvo.")
+
+# ====================== Páginas ======================
+def page_receitas_despesas():
+    st.markdown("## Receitas e Despesas")
+
+    ctop1, ctop2 = st.columns([1, 3])
+    with ctop1:
+        if st.button("➕ Novo lançamento", help="Atalho para incluir um lançamento"):
+            st.session_state["tab_index"] = 0  # permanece na mesma aba e rola até os formulários
+    with ctop2:
+        pass
+
+    st.divider()
+    st.markdown("### Lançar")
+    c1, c2 = st.columns(2)
+    with c1:
+        form_lancamento_generico(default_type="expense", label="Despesa")
+        form_lancamento_generico(default_type="tax", label="Imposto/Taxa")
+        form_lancamento_generico(default_type="payroll", label="Folha")
+    with c2:
+        form_lancamento_generico(default_type="income", label="Receita")
+        form_lancamento_generico(default_type="card", label="Lançamento de Cartão")
+
+    st.divider()
+    tabela_lancamentos_filtro()
+
+def page_extratos():
+    st.markdown("## Extratos")
+    accs = fetch_df("SELECT id, name, type FROM accounts ORDER BY name")
+    if accs.empty:
+        st.info("Cadastre ao menos uma conta em 'accounts' (seed já inclui duas).")
+        return
+
+    nomes = [(int(r.id), f"{r.name} ({r.type})") for _, r in accs.iterrows()]
+    acc_id, acc_label = st.selectbox("Conta", options=nomes, format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+    acc_id = acc_id if isinstance(acc_id, int) else acc_id[0]
+
+    q = """
+        SELECT t.id, t.trx_date as Data, t.type as Tipo, t.description as Descrição, t.amount as Valor,
+               t.status as Status
+        FROM transactions t
+        WHERE t.account_id = ?
+        ORDER BY date(t.trx_date) DESC, t.id DESC
+    """
+    df = fetch_df(q, (acc_id,))
+    st.dataframe(df, use_container_width=True)
+
+    saldo = 0.0
+    if not df.empty:
+        entradas = df.loc[df["Tipo"] == "income", "Valor"].sum()
+        saidas = df.loc[df["Tipo"] != "income", "Valor"].sum()
+        saldo = float(entradas - saidas)
+    st.metric("Saldo estimado da conta", money(saldo))
+
+def page_conciliacao():
+    st.markdown("## Conciliação")
+    st.info("Módulo simples para marcar lançamentos como conciliados.")
+    ids_df = fetch_df("""
+        SELECT id, trx_date as Data, description as Descrição, amount as Valor, status as Status
+        FROM transactions
+        WHERE status IN ('planned','paid')
+        ORDER BY date(trx_date) DESC, id DESC
+        LIMIT 200
+    """)
+    if ids_df.empty:
+        st.success("Não há lançamentos pendentes para conciliar.")
+        return
+
+    st.dataframe(ids_df, use_container_width=True)
+    id_sel = st.number_input("ID para conciliar", min_value=0, step=1)
+    if st.button("Marcar como conciliado"):
+        if id_sel in ids_df["id"].values:
+            exec_sql("UPDATE transactions SET status='reconciled', paid_date=? WHERE id=?",
+                     (date.today().isoformat(), int(id_sel)))
+            st.success(f"Lançamento {int(id_sel)} conciliado.")
+            do_rerun()
+        else:
+            st.error("ID não encontrado na lista acima.")
+
+def page_relatorios():
+    st.markdown("## Relatórios e Dashboard")
+    kpis_overview()
+
+    st.subheader("Resumo por Categoria")
+    q = """
+        SELECT
+            (SELECT name FROM categories c WHERE c.id = t.category_id) as Categoria,
+            t.type as Tipo,
+            SUM(CASE WHEN t.type='income' THEN t.amount ELSE 0 END) as Total_Receitas,
+            SUM(CASE WHEN t.type!='income' THEN t.amount ELSE 0 END) as Total_Despesas
+        FROM transactions t
+        GROUP BY Categoria, Tipo
+        ORDER BY COALESCE(Categoria,'(sem)') ASC
+    """
+    q, p = scope_filters(q, [])
+    dfc = fetch_df(q, tuple(p))
+    st.dataframe(dfc, use_container_width=True)
+    col1, col2 = st.columns(2)
+    with col1:
+        export_excel(dfc, "resumo_categoria.xlsx")
+    with col2:
+        export_csv(dfc, "resumo_categoria.csv")
+
+# ====================== Layout principal ======================
+def main():
+    init_db()
+    seed_minimums()
+    top_ticker()
+
+    # Barra superior com botão "+"
+    ctop1, ctop2 = st.columns([0.1, 0.9])
+    with ctop1:
+        if st.button("➕", help="Adicionar lançamento (vai para 'Receitas e Despesas')"):
+            st.session_state["tab_index"] = 0
+    with ctop2:
+        st.markdown(f"### {PAGE_TITLE}")
+
+    # Login / Cadastro
+    signup_widget()
+    logged = login_widget()
+    if not logged:
+        st.stop()
+
+    # Controle de guia ativa
+    if "tab_index" not in st.session_state:
+        st.session_state["tab_index"] = 0
+
+    tabs = st.tabs(["Receitas e Despesas", "Extratos", "Conciliação", "Relatórios e Dashboard"])
+    with tabs[0]:
+        page_receitas_despesas()
+    with tabs[1]:
+        page_extratos()
+    with tabs[2]:
+        page_conciliacao()
+    with tabs[3]:
+        page_relatorios()
 
 if __name__ == "__main__":
     main()
