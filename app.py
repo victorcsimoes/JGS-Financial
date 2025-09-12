@@ -1,9 +1,10 @@
-# app.py — FinApp (DEV) | UI azul/white, sem modo escuro, Home com fluxo de caixa + pizzas + Links Úteis
-# Execução: python -m streamlit run app.py --server.port 8501 --server.fileWatcherType=none
+# app.py — FinApp (UI clara + tabelas visíveis + botões corrigidos + avisos 3s + valor digitável)
+# Execução: streamlit run app.py
 # Requisitos: streamlit, pandas, openpyxl
-# Opcionais: yfinance (dólar na faixa) e plotly (gráficos)
+# Opcionais: yfinance (dólar) e plotly (gráficos)
 
 import os
+import time
 import hashlib
 import sqlite3
 from io import BytesIO
@@ -13,15 +14,15 @@ from typing import Optional, Tuple, List
 import pandas as pd
 import streamlit as st
 
-# --- USD opcional (yfinance) ---
+# ======== USD opcional ========
 try:
-    import yfinance as yf  # pip install yfinance
+    import yfinance as yf
 except Exception:
     yf = None
 
-# --- Gráficos (plotly) ---
+# ======== Gráficos (opcional) ========
 try:
-    import plotly.express as px  # pip install plotly
+    import plotly.express as px
     import plotly.graph_objects as go
 except Exception:
     px = None
@@ -38,7 +39,7 @@ PAGE_TITLE = "FinApp | JVSeps® "
 st.set_page_config(page_title=PAGE_TITLE, layout="wide")
 
 # =============== Tema (somente CLARO) & estilos globais ===============
-PRIMARY_DARK_BLUE = "#0E2A47"   # azul escuro base
+PRIMARY_DARK_BLUE = "#0E2A47"
 PRIMARY_BLUE_2   = "#0F4C81"
 
 def apply_global_styles():
@@ -49,8 +50,8 @@ def apply_global_styles():
         --finapp-bg-2:#FFFFFF;
         --finapp-primary:{PRIMARY_DARK_BLUE};
         --finapp-primary-2:{PRIMARY_BLUE_2};
-        --finapp-text:#0d1b2a;
-        --finapp-text-soft:#334155;
+        --finapp-text:#0f172a;          /* TEXTO ESCURO GLOBAL */
+        --finapp-text-soft:#475569;     /* cinza médio para labels */
         --finapp-border:#e6ebf2;
         --finapp-shadow:0 6px 18px rgba(14,42,71,0.08);
         --finapp-radius:16px;
@@ -58,70 +59,42 @@ def apply_global_styles():
         --finapp-grad-2:var(--finapp-primary-2);
         --finapp-link:#0F4C81;
         --finapp-line-blue:{PRIMARY_DARK_BLUE};
-        --finapp-contrast:#eef2f7; /* quase branco */
+        --finapp-contrast:#ffffff;
 
-        /* >>> Posição e altura da barra rolante <<< */
-        --ticker-offset-top: 18px;   /* "um pouco mais baixa" */
-        --ticker-height: 46px;       /* altura da barra */
+        --ticker-offset-top: 18px;
+        --ticker-height: 46px;
       }}
 
-      /* ===== Remover "barra de moldura" do Streamlit ===== */
-      div[data-testid="stDecoration"] {{ display:none !important; }}   /* tira a faixa colorida do topo */
-      header[data-testid="stHeader"] {{
-        background: transparent !important;
-        box-shadow: none !important;
-      }}
+      /* Remove faixa padrão do Streamlit e mantém topo limpo */
+      div[data-testid="stDecoration"] {{ display:none !important; }}
+      header[data-testid="stHeader"] {{ background: transparent !important; box-shadow: none !important; }}
 
-      /* ===== Normaliza scroll ===== */
       html, body, .stApp {{ height: 100%; overflow-y: auto !important; }}
       .stApp {{ background: var(--finapp-bg); color: var(--finapp-text); }}
       .block-container {{ overflow: visible !important; padding-top: .6rem; max-width: 1240px; }}
-      h1,h2,h3,h4,h5,h6 {{ color: var(--finapp-primary); letter-spacing:.2px; }}
-      .markdown-text-container, .stMarkdown, p, label, span, div {{ color: var(--finapp-text); }}
-      .finapp-muted {{ color: var(--finapp-text-soft); }}
+
+      /* Títulos e textos padrão (evita transparências) */
+      h1,h2,h3,h4,h5,h6 {{ color: var(--finapp-primary) !important; letter-spacing:.2px; }}
+      .stMarkdown, .markdown-text-container, p, label, span, div {{ color: var(--finapp-text) !important; }}
+      .finapp-muted {{ color: var(--finapp-text-soft) !important; }}
       a, .stMarkdown a {{ color: var(--finapp-link) !important; text-decoration: none; }}
       a:hover {{ text-decoration: underline; }}
 
-      /* ===== Barra superior rolante (ticker) ===== */
-      .finapp-marquee-wrap {{
-        position: sticky;
-        top: var(--ticker-offset-top);
-        z-index: 1000;
-        margin: 0 0 10px 0;
-      }}
+      /* ===== Barra superior rolante ===== */
+      .finapp-marquee-wrap {{ position: sticky; top: var(--ticker-offset-top); z-index: 1000; margin: 0 0 10px 0; }}
       .finapp-marquee {{
-        width: 100%;
-        height: var(--ticker-height);
-        overflow: hidden;
-        white-space: nowrap;
-        box-sizing: border-box;
-        background: {PRIMARY_DARK_BLUE};        /* azul escuro fixo */
-        border-radius: 12px;
-        box-shadow: var(--finapp-shadow);
-        display: flex; align-items: center;     /* centraliza verticalmente */
-        padding: 0 14px;
+        width: 100%; height: var(--ticker-height); overflow: hidden; white-space: nowrap; box-sizing: border-box;
+        background: {PRIMARY_DARK_BLUE}; border-radius: 12px; box-shadow: var(--finapp-shadow);
+        display: flex; align-items: center; padding: 0 14px;
       }}
       .finapp-marquee, .finapp-marquee * {{ color:#fff !important; fill:#fff !important; }}
-      .finapp-marquee span {{
-        display: inline-block;
-        padding-left: 100%;
-        line-height: var(--ticker-height);      /* baseline centralizado */
-        animation: finapp-scroll-left 22s linear infinite;
-      }}
-      @keyframes finapp-scroll-left {{
-        0% {{ transform: translateX(0); }}
-        100% {{ transform: translateX(-100%); }}
-      }}
+      .finapp-marquee span {{ display: inline-block; padding-left: 100%; line-height: var(--ticker-height); animation: finapp-scroll-left 22s linear infinite; }}
+      @keyframes finapp-scroll-left {{ 0% {{ transform: translateX(0); }} 100% {{ transform: translateX(-100%); }} }}
 
-      /* ===== Tabs (aba ativa com texto branco) ===== */
+      /* ===== Tabs ===== */
       .stTabs [role="tablist"] {{
-        position: sticky;
-        top: calc(var(--ticker-offset-top) + var(--ticker-height) + 8px);
-        z-index: 999;
-        background: var(--finapp-bg);
-        padding: 6px 0;
-        margin-bottom: 8px;
-        border-bottom: none;   /* sem "moldura" */
+        position: sticky; top: calc(var(--ticker-offset-top) + var(--ticker-height) + 8px); z-index: 999;
+        background: var(--finapp-bg); padding: 6px 0; margin-bottom: 8px; border-bottom: none;
       }}
       .stTabs [data-baseweb="tab-list"] {{ gap: 6px; background: transparent; flex-wrap: wrap; }}
       .stTabs [data-baseweb="tab"]{{
@@ -131,73 +104,108 @@ def apply_global_styles():
       }}
       .stTabs [role="tab"][aria-selected="true"] {{
         background: linear-gradient(90deg, var(--finapp-grad-1), var(--finapp-grad-2)) !important;
-        border-color: transparent !important;
-        font-weight: 700;
+        border-color: transparent !important; font-weight: 700; color:#fff !important;
       }}
-      .stTabs [role="tab"][aria-selected="true"],
-      .stTabs [role="tab"][aria-selected="true"] *,
-      .stTabs button[role="tab"][aria-selected="true"],
-      .stTabs button[role="tab"][aria-selected="true"] * {{
-        color:#fff !important; fill:#fff !important;
-      }}
+      .stTabs [role="tab"][aria-selected="true"] * {{ color:#fff !important; }}
 
-      /* ===== Cards ===== */
+      /* ===== Cards / BANNERS ===== */
       .finapp-card {{
-        background: var(--finapp-bg-2);
-        border: 1px solid var(--finapp-border);
-        border-radius: var(--finapp-radius);
-        padding: 16px 18px;
-        box-shadow: var(--finapp-shadow);
+        background: var(--finapp-bg-2); border: 1px solid var(--finapp-border);
+        border-radius: var(--finapp-radius); padding: 16px 18px; box-shadow: var(--finapp-shadow);
+        color: var(--finapp-text) !important;
       }}
+      .finapp-card * {{ color: var(--finapp-text) !important; }}
+      /* st.info/success/warning (banners de página) */
+      [data-testid="stAlert"] {{
+        background:#FFFFFF !important; border:1px solid var(--finapp-border) !important;
+        color: var(--finapp-text) !important; border-radius: 14px !important; box-shadow: var(--finapp-shadow);
+      }}
+      [data-testid="stAlert"] * {{ color: var(--finapp-text) !important; }}
 
-      /* ===== Botões com alto contraste ===== */
-      .stButton > button, .stDownloadButton > button {{
-        background: var(--finapp-grad-2);
+      /* ===== BOTÕES ===== */
+      .stButton > button[kind="primary"], .stForm button, .stDownloadButton > button {{
+        background: var(--finapp-grad-2) !important;
         color: var(--finapp-contrast) !important;
-        border: 1px solid var(--finapp-grad-2);
+        border: 1px solid var(--finapp-grad-2) !important;
         border-radius: 14px; padding: 8px 14px; font-weight: 700;
         transition: all .15s ease; box-shadow: var(--finapp-shadow);
       }}
-      .stButton > button:hover, .stDownloadButton > button:hover {{
-        background: var(--finapp-grad-1); border-color: var(--finapp-grad-1);
+      .stButton > button[kind="primary"]:hover, .stForm button:hover, .stDownloadButton > button:hover {{
+        background: var(--finapp-grad-1) !important; border-color: var(--finapp-grad-1) !important;
         transform: translateY(-1px); color: var(--finapp-contrast) !important;
       }}
+      .stDownloadButton > button *, .stButton > button[kind="primary"] *, .stForm button * {{
+        color: var(--finapp-contrast) !important; fill: var(--finapp-contrast) !important;
+      }}
 
-      /* ===== Inputs ===== */
+      /* Secundário (estilo "Sair" — também para "Marcar como conciliado") */
+      .stButton > button[kind="secondary"], .stButton > button:not([kind]) {{
+        background: transparent !important;
+        color: var(--finapp-primary) !important;
+        border: 1.5px solid var(--finapp-primary) !important;
+        border-radius: 14px; padding: 8px 14px; font-weight: 700; box-shadow: none !important;
+      }}
+      .stButton > button[kind="secondary"]:hover, .stButton > button:not([kind]):hover {{
+        background: #0E2A4714 !important;
+      }}
+
+      /* ===== INPUTS ===== */
       .stTextInput > div > div > input,
       .stNumberInput input,
       .stDateInput input,
       .stSelectbox > div > div {{
-        background: var(--finapp-bg-2); color: var(--finapp-text) !important;
-        border-radius: 12px !important; border: 1px solid var(--finapp-border);
-        box-shadow: none;
+        background: var(--finapp-bg-2) !important; color: var(--finapp-text) !important;
+        border-radius: 12px !important; border: 1px solid var(--finapp-border) !important; box-shadow: none !important;
       }}
-      .stTextInput label, .stNumberInput label, .stDateInput label, .stSelectbox label {{ color: var(--finapp-text); }}
+      .stTextInput label, .stNumberInput label, .stDateInput label, .stSelectbox label {{ color: var(--finapp-text) !important; }}
       ::placeholder {{ color: var(--finapp-text-soft); opacity: 0.9; }}
 
-      /* ===== Métricas, DataFrame e Grids ===== */
+      /* ===== SELECTS (dropdown claro) ===== */
+      [data-baseweb="select"] * {{ background-color: #FFFFFF !important; color: var(--finapp-text) !important; }}
+      div[role="combobox"] {{ background-color: #FFFFFF !important; color: var(--finapp-text) !important; border-radius: 12px !important; }}
+      ul[role="listbox"], div[role="listbox"] {{ background-color: #FFFFFF !important; color: var(--finapp-text) !important; border: 1px solid #E5E7EB !important; }}
+      li[role="option"] {{ background-color: #FFFFFF !important; color: var(--finapp-text) !important; }}
+      li[role="option"][aria-selected="true"], li[role="option"]:hover {{ background-color: #EEF2FF !important; color: var(--finapp-text) !important; }}
+
+      /* ===== TABELAS (fundo claro + texto ESCURO e grade visível) ===== */
+      .stTable, .stDataFrame, .stDataFrame div, .stDataFrame table {{ background:#FFFFFF !important; color:#0f172a !important; }}
+      [data-testid="stDataFrame"], [data-testid="stTable"] {{ color:#0f172a !important; }}
+      [data-testid="stDataFrame"] *, [data-testid="stTable"] * {{ color:#0f172a !important; opacity:1 !important; }}
+      .stDataFrame thead th, .stTable thead th {{ background:#FFFFFF !important; color:#0f172a !important; border-color:#E5E7EB !important; }}
+      .stDataFrame tbody td, .stTable tbody td {{ background:#FFFFFF !important; color:#0f172a !important; border-color:#E5E7EB !important; }}
+      .stDataFrame table tbody tr:nth-child(even) td {{ background:#FAFAFF !important; }}
+      .stDataFrame table tbody tr:hover td {{ background:#F0F4FF !important; }}
+
+      /* ===== MÉTRICAS (cards da Home) ===== */
       [data-testid="stMetric"] {{
-        background: var(--finapp-bg-2); border: 1px solid var(--finapp-border);
-        border-radius: 14px; padding: 10px 12px; box-shadow: var(--finapp-shadow); color: var(--finapp-primary);
+        background:#FFFFFF; border:1px solid var(--finapp-border);
+        border-radius:14px; padding:10px 12px; box-shadow:var(--finapp-shadow);
       }}
-      .stDataFrame {{ border: 1px solid var(--finapp-border); border-radius: 12px; box-shadow: var(--finapp-shadow); }}
+      [data-testid="stMetricLabel"]{{ color:#64748b !important; font-weight:600 !important; }}
+      [data-testid="stMetricValue"]{{ color:#0f172a !important; font-weight:800 !important; }}
+
+      /* ===== File Uploader (drag & drop) ===== */
+      [data-testid="stFileUploaderDropzone"],
+      [data-testid="stFileUploader"] section {{
+        background:#FFFFFF !important; border:1px solid #E5E7EB !important; color:#0f172a !important;
+        border-radius:14px !important;
+      }}
+      [data-testid="stFileUploaderDropzone"] * {{ color:#0f172a !important; opacity:1 !important; }}
+
+      /* ===== Grids utilitários ===== */
       .finapp-grid {{ display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); align-items: stretch; }}
       .finapp-grid-2 {{ display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); align-items: stretch; }}
 
-      /* ===== Divisores como linhas finas azul-escuro ===== */
+      /* Divisores finos */
       hr, .stDivider hr, div[role="separator"], div[data-testid="stDivider"] hr {{
-        border: none !important; border-top: 1px solid var(--finapp-line-blue) !important;
-        height: 0 !important; margin: 8px 0 !important; border-radius: 0 !important;
-        box-shadow: none !important; background: transparent !important;
+        border: none !important; border-top: 1px solid var(--finapp-line-blue) !important; height: 0 !important; margin: 8px 0 !important;
       }}
 
-      /* ===== Sidebar ===== */
-      section[data-testid="stSidebar"] {{
-        background: linear-gradient(180deg, var(--finapp-grad-1) 0%, var(--finapp-grad-2) 100%) !important;
-      }}
+      /* Sidebar (mantém "Sair" translúcido) */
+      section[data-testid="stSidebar"] {{ background: linear-gradient(180deg, var(--finapp-grad-1) 0%, var(--finapp-grad-2) 100%) !important; }}
       section[data-testid="stSidebar"] * {{ color: #e6edf7 !important; }}
-      section[data-testid="stSidebar"] .stButton>button {{ background: #ffffff22; border-color: #ffffff33; color:#fff !important; }}
-      section[data-testid="stSidebar"] .stButton>button:hover {{ background: #ffffff33; transform: none; color:#fff !important; }}
+      section[data-testid="stSidebar"] .stButton>button {{ background: #ffffff22 !important; border-color: #ffffff33 !important; color:#fff !important; }}
+      section[data-testid="stSidebar"] .stButton>button:hover {{ background: #ffffff33 !important; transform: none; color:#fff !important; }}
 
       @media (max-width: 640px){{ h1,h2 {{ font-size: 1.3rem; }} .finapp-marquee {{ font-size: 0.95rem; }} }}
     </style>
@@ -244,8 +252,17 @@ def do_rerun():
         except Exception:
             pass
 
+def flash(msg: str, kind: str = "success", seconds: float = 3.0):
+    """Mostra um aviso por X segundos antes de continuar."""
+    if   kind == "success": st.success(msg)
+    elif kind == "info":    st.info(msg)
+    elif kind == "warning": st.warning(msg)
+    elif kind == "error":   st.error(msg)
+    else:                   st.write(msg)
+    time.sleep(max(0.1, seconds))
+
 def current_theme_base() -> str:
-    return "light"  # sem modo escuro
+    return "light"
 
 # ====================== DB helpers ======================
 def _connect() -> sqlite3.Connection:
@@ -388,7 +405,7 @@ def seed_minimums():
         for n, p, k in base:
             exec_sql("INSERT INTO categories (name,parent_id,kind) VALUES (?,?,?)", (n, p, k))
 
-# ====================== Escopo (DEV: sem restrição) ======================
+# ====================== Escopo (DEV) ======================
 def scope_filters(base_query: str, params: List) -> Tuple[str, List]:
     return base_query, params
 
@@ -445,16 +462,49 @@ def show_attachment_ui(path: str):
         st.info("Pré-visualização inline disponível apenas para imagens. Use o botão para baixar o arquivo.")
     st.download_button("⬇️ Baixar anexo", data=data, file_name=fname)
 
-# ====================== Faixa rolante (data + USD + direitos) ======================
-def top_ticker():
-    hoje = datetime.now().strftime("%d/%m/%y")
-    usd = get_usd_brl()
-    usd_txt = f"Dólar: R$ {usd:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") if usd else "Dólar: n/d"
-    msg = f"{hoje}  •  {usd_txt}  •  Finapp® | todos os direitos reservados."
-    st.markdown(
-        f'<div class="finapp-marquee-wrap"><div class="finapp-marquee"><span>{msg} &nbsp; • &nbsp; {msg}</span></div></div>',
-        unsafe_allow_html=True
-    )
+# ====================== Entrada livre de dinheiro ======================
+def money_input(label: str, key: Optional[str] = None, value: str = "", help: Optional[str] = None) -> float:
+    """
+    Campo de texto que aceita valores com ponto OU vírgula e separador de milhar.
+    Retorna float (0.0 se vazio/ inválido).
+    """
+    raw = st.text_input(label, value=value, key=key, help=help, placeholder="0,00")
+    raw = (raw or "").strip().replace(" ", "")
+    if raw == "":
+        return 0.0
+
+    # Remove milhares e normaliza decimal (suporta "1.234,56" e "1,234.56")
+    cleaned = raw
+    if "," in cleaned and "." in cleaned:
+        cleaned = cleaned.replace(".", "").replace(",", ".")
+    else:
+        cleaned = cleaned.replace(",", ".")
+
+    try:
+        val = float(cleaned)
+    except Exception:
+        val = 0.0
+    return val
+
+# ====================== Tabelas estáticas legíveis ======================
+def show_df(df: pd.DataFrame, empty_msg: str = "Sem dados para exibir."):
+    """Renderiza tabela estática (st.table) com fonte escura e grade visível."""
+    if df is None or df.empty:
+        st.info(empty_msg)
+        return
+    try:
+        styler = (
+            df.style
+              .set_properties(**{"color":"#0f172a", "border-color":"#E5E7EB"})
+              .set_table_styles([
+                  {"selector":"th", "props":[("color","#0f172a"),("border","1px solid #E5E7EB"),("background","#FFFFFF")]},
+                  {"selector":"td", "props":[("color","#0f172a"),("border","1px solid #E5E7EB"),("background","#FFFFFF")]},
+                  {"selector":"tbody tr:nth-child(even) td", "props":[("background","#FAFAFF")]},
+              ])
+        )
+        st.table(styler)
+    except Exception:
+        st.table(df)
 
 # ====================== Login & Cadastro (compacto) ======================
 def signup_widget():
@@ -488,7 +538,7 @@ def signup_widget():
                         "account_id": None,
                         "sectors": [],
                     }
-                    st.sidebar.success("Conta criada e login efetuado.")
+                    flash("Conta criada e login efetuado.", "success", 3)
                     do_rerun()
 
 def login_widget() -> bool:
@@ -521,7 +571,7 @@ def login_widget() -> bool:
             do_rerun()
     return True
 
-# ====================== KPIs (sem tabela) ======================
+# ====================== KPIs ======================
 def kpis_cards():
     base = (
         "SELECT "
@@ -549,7 +599,7 @@ def form_lancamento_generico(default_type: str = 'expense', label: str = "Novo l
     with st.form(f"form_{label}_{default_type}"):
         c1, c2, c3 = st.columns(3)
         dt_val = c1.date_input("Data", value=date.today())
-        amount = c2.number_input("Valor (R$)", min_value=0.0, step=0.01, format="%.2f")
+        amount = money_input("Valor (R$)", key=f"money_{label}_{default_type}")  # entrada livre
         method = c3.selectbox("Meio de Pagamento", ["pix", "ted", "boleto", "dinheiro", "cartão", "outro"]) if default_type != 'card' else "cartão"
 
         c4, c5, c6 = st.columns(3)
@@ -561,9 +611,10 @@ def form_lancamento_generico(default_type: str = 'expense', label: str = "Novo l
                 else (None, "—")
             )
             c4.caption(f"Conta vinculada: {acc[1]}")
+            acc_value = acc
         else:
             acc_options = [(None, "—")] + [(int(r.id), r.name) for _, r in accounts_df.iterrows()]
-            acc = c4.selectbox("Conta", options=acc_options, format_func=safe_label)
+            acc_value = c4.selectbox("Conta", options=acc_options, format_func=safe_label)
 
         if default_type != 'income':
             categories_df = fetch_df("SELECT id, name FROM categories WHERE kind IN ('expense','tax','payroll')")
@@ -588,7 +639,7 @@ def form_lancamento_generico(default_type: str = 'expense', label: str = "Novo l
         submitted = st.form_submit_button("Salvar lançamento")
         if submitted:
             if amount <= 0:
-                st.error("Informe um valor maior que zero.")
+                flash("Informe um valor maior que zero.", "warning", 3)
             else:
                 attach_path = None
                 if attach is not None:
@@ -599,9 +650,9 @@ def form_lancamento_generico(default_type: str = 'expense', label: str = "Novo l
                             f.write(attach.getbuffer())
                         attach_path = fpath
                     except Exception as e:
-                        st.error(f"Falha ao salvar anexo: {e}")
+                        flash(f"Falha ao salvar anexo: {e}", "error", 3)
 
-                account_id_final = force_account_id if force_account_id else (acc[0] if isinstance(acc, tuple) else None)
+                account_id_final = force_account_id if force_account_id else (acc_value[0] if isinstance(acc_value, tuple) else None)
                 exec_sql(
                     """
                     INSERT INTO transactions (
@@ -617,7 +668,7 @@ def form_lancamento_generico(default_type: str = 'expense', label: str = "Novo l
                         method, doc, party, desc, float(amount), status, "manual", attach_path
                     ),
                 )
-                st.success("Lançamento salvo com sucesso.")
+                flash("Lançamento salvo com sucesso.", "success", 3)
                 do_rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -650,7 +701,7 @@ def tabela_lancamentos_filtro():
     q += " ORDER BY date(t.trx_date) DESC, t.id DESC"
 
     df = fetch_df(q, tuple(params))
-    st.dataframe(df, use_container_width=True)
+    show_df(df, empty_msg="Sem lançamentos no período.")
     col1, col2 = st.columns(2)
     with col1:
         export_excel(df, "lancamentos.xlsx")
@@ -695,15 +746,12 @@ def page_home():
     st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
     st.subheader("Fluxo de Caixa (Mensal)")
     df_fluxo = _fluxo_caixa_df()
-    tpl = "plotly_white"
-    paper_bg = "rgba(0,0,0,0)"
+    tpl = "plotly_white"; paper_bg = "rgba(0,0,0,0)"
     if go and not df_fluxo.empty:
         fig_fluxo = go.Figure(data=[go.Bar(x=df_fluxo["mes_label"], y=df_fluxo["saldo"])])
-        fig_fluxo.update_layout(
-            template=tpl, paper_bgcolor=paper_bg, plot_bgcolor=paper_bg,
-            margin=dict(t=20,b=12,l=12,r=12), height=300,
-            yaxis_title="Saldo (R$)", xaxis_title="Mês"
-        )
+        fig_fluxo.update_layout(template=tpl, paper_bgcolor=paper_bg, plot_bgcolor=paper_bg,
+                                margin=dict(t=20,b=12,l=12,r=12), height=300,
+                                yaxis_title="Saldo (R$)", xaxis_title="Mês")
         st.plotly_chart(fig_fluxo, use_container_width=True)
     else:
         st.bar_chart(df_fluxo.set_index("mes_label"))
@@ -742,32 +790,28 @@ def page_home():
     st.markdown('<div class="finapp-card">', unsafe_allow_html=True)
     st.markdown("**Despesas por Categoria**")
     if px and not df_desp.empty and df_desp["Total"].sum() > 0:
-        fig1 = px.pie(df_desp, names="Categoria", values="Total", hole=0.35,
-                      color_discrete_sequence=palette)
+        fig1 = px.pie(df_desp, names="Categoria", values="Total", hole=0.35, color_discrete_sequence=palette)
         fig1.update_traces(textposition='inside', textinfo='percent+label')
-        fig1.update_layout(template=tpl, paper_bgcolor=paper_bg, plot_bgcolor=paper_bg,
-                           margin=dict(t=20,b=12,l=12,r=12))
+        fig1.update_layout(template=tpl, paper_bgcolor=paper_bg, plot_bgcolor=paper_bg, margin=dict(t=20,b=12,l=12,r=12))
         st.plotly_chart(fig1, use_container_width=True)
     elif df_desp.empty:
         st.info("Sem dados de despesas para exibir.")
     else:
-        st.dataframe(df_desp, use_container_width=True)
+        show_df(df_desp)
         st.caption("Instale o plotly para ver o gráfico: pip install plotly")
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="finapp-card">', unsafe_allow_html=True)
     st.markdown("**Receitas por Categoria**")
     if px and not df_rec.empty and df_rec["Total"].sum() > 0:
-        fig2 = px.pie(df_rec, names="Categoria", values="Total", hole=0.35,
-                      color_discrete_sequence=palette)
+        fig2 = px.pie(df_rec, names="Categoria", values="Total", hole=0.35, color_discrete_sequence=palette)
         fig2.update_traces(textposition='inside', textinfo='percent+label')
-        fig2.update_layout(template=tpl, paper_bgcolor=paper_bg, plot_bgcolor=paper_bg,
-                           margin=dict(t=20,b=12,l=12,r=12))
+        fig2.update_layout(template=tpl, paper_bgcolor=paper_bg, plot_bgcolor=paper_bg, margin=dict(t=20,b=12,l=12,r=12))
         st.plotly_chart(fig2, use_container_width=True)
     elif df_rec.empty:
         st.info("Sem dados de receitas para exibir.")
     else:
-        st.dataframe(df_rec, use_container_width=True)
+        show_df(df_rec)
         st.caption("Instale o plotly para ver o gráfico: pip install plotly")
     st.markdown('</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
@@ -792,8 +836,7 @@ def page_home():
             <a href="https://web.whatsapp.com" target="_blank" rel="noopener">Abrir no navegador</a>
           </div>
         </div>
-        """,
-        unsafe_allow_html=True,
+        """, unsafe_allow_html=True,
     )
 
     st.markdown(
@@ -812,8 +855,7 @@ def page_home():
             <a href="https://www.gov.br/receitafederal/pt-br" target="_blank" rel="noopener">Acessar Receita Federal</a>
           </div>
         </div>
-        """,
-        unsafe_allow_html=True,
+        """, unsafe_allow_html=True,
     )
 
     st.markdown(
@@ -822,10 +864,8 @@ def page_home():
           <div style="font-weight:700;">Outro Link Útil</div>
           <div class="finapp-muted" style="margin-top:4px;">Adicionaremos aqui quando você enviar.</div>
         </div>
-        """,
-        unsafe_allow_html=True,
+        """, unsafe_allow_html=True,
     )
-
     st.markdown('</div>', unsafe_allow_html=True)
 
 def page_receitas_despesas():
@@ -875,8 +915,7 @@ def page_extratos():
         ORDER BY date(t.trx_date) DESC, t.id DESC
     """
     df = fetch_df(q, (acc_id,))
-    st.dataframe(df, use_container_width=True)
-
+    show_df(df, empty_msg="Sem movimentações para esta conta.")
     saldo = 0.0
     if not df.empty:
         entradas = df.loc[df["Tipo"] == "income", "Valor"].sum()
@@ -888,29 +927,48 @@ def page_extratos():
 def page_conciliacao():
     st.markdown("## Conciliação")
     st.markdown('<div class="finapp-card">', unsafe_allow_html=True)
-    st.info("Módulo simples para marcar lançamentos como conciliados.")
-    ids_df = fetch_df("""
+    st.info("Marque lançamentos como conciliados. Os itens conciliados descem para a lista **Conciliados**.")
+
+    pendentes = fetch_df("""
         SELECT id, trx_date as Data, description as Descrição, amount as Valor, status as Status
         FROM transactions
-        WHERE status IN ('planned','paid')
+        WHERE status IN ('planned','paid','overdue')
         ORDER BY date(trx_date) DESC, id DESC
-        LIMIT 200
+        LIMIT 300
     """)
-    if ids_df.empty:
+    st.subheader("A conciliar")
+    if pendentes.empty:
         st.success("Não há lançamentos pendentes para conciliar.")
-        st.markdown('</div>', unsafe_allow_html=True)
-        return
+    else:
+        show_df(pendentes, empty_msg="Sem pendências.")
+        c1, c2 = st.columns([1,3])
+        with c1:
+            id_sel = st.number_input("ID para conciliar", min_value=0, step=1)
+        with c2:
+            if st.button("Marcar como conciliado", type="secondary", key="btn_conciliar"):
+                if id_sel in pendentes["id"].values:
+                    exec_sql("UPDATE transactions SET status='reconciled', paid_date=? WHERE id=?",
+                             (date.today().isoformat(), int(id_sel)))
+                    flash(f"Lançamento {int(id_sel)} conciliado.", "success", 3)
+                    do_rerun()
+                else:
+                    flash("ID não encontrado na lista acima.", "error", 3)
 
-    st.dataframe(ids_df, use_container_width=True)
-    id_sel = st.number_input("ID para conciliar", min_value=0, step=1)
-    if st.button("Marcar como conciliado"):
-        if id_sel in ids_df["id"].values:
-            exec_sql("UPDATE transactions SET status='reconciled', paid_date=? WHERE id=?",
-                     (date.today().isoformat(), int(id_sel)))
-            st.success(f"Lançamento {int(id_sel)} conciliado.")
-            do_rerun()
-        else:
-            st.error("ID não encontrado na lista acima.")
+    st.markdown("---")
+
+    reconc = fetch_df("""
+        SELECT id, trx_date as Data, description as Descrição, amount as Valor, paid_date as 'Conciliado em'
+        FROM transactions
+        WHERE status='reconciled'
+        ORDER BY date(paid_date) DESC, id DESC
+        LIMIT 300
+    """)
+    st.subheader("Conciliados")
+    if reconc.empty:
+        st.info("Ainda não há itens conciliados.")
+    else:
+        show_df(reconc, empty_msg="(vazio)")
+
     st.markdown('</div>', unsafe_allow_html=True)
 
 def page_relatorios():
@@ -931,7 +989,7 @@ def page_relatorios():
     """
     q, p = scope_filters(q, [])
     dfc = fetch_df(q, tuple(p))
-    st.dataframe(dfc, use_container_width=True)
+    show_df(dfc, empty_msg="Sem dados para o período.")
     col1, col2 = st.columns(2)
     with col1:
         export_excel(dfc, "resumo_categoria.xlsx")
@@ -943,7 +1001,7 @@ def page_relatorios():
 def main():
     init_db()
     seed_minimums()
-    top_ticker()  # Barra rolante no topo (STICKY e visível)
+    top_ticker()
 
     st.markdown(f"### {PAGE_TITLE}")
 
@@ -951,9 +1009,6 @@ def main():
     logged = login_widget()
     if not logged:
         st.stop()
-
-    if "tab_index" not in st.session_state:
-        st.session_state["tab_index"] = 0  # Home
 
     tabs = st.tabs(["Home", "Receitas e Despesas", "Extratos", "Conciliação", "Relatórios e Dashboard"])
     with tabs[0]:
@@ -969,3 +1024,13 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# (Opcional) esconder header/footer padrão do Streamlit
+HIDE_DEFAULT_FORMATTING = """
+<style>
+#MainMenu {visibility:hidden;}
+header {visibility:hidden;}
+footer {visibility:hidden;}
+</style>
+"""
+st.markdown(HIDE_DEFAULT_FORMATTING, unsafe_allow_html=True)
