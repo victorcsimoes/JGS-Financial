@@ -1,4 +1,4 @@
-# app.py — FinApp (UI clara + tabelas visíveis + botões corrigidos + avisos 3s + valor digitável)
+# app.py — FinApp (UI clara + tabelas visíveis + botões corrigidos + avisos 3s + valor digitável + CONFIGURAÇÕES + AGENDA PÚBLICA/PRIVADA)
 # Execução: streamlit run app.py
 # Requisitos: streamlit, pandas, openpyxl
 # Opcionais: yfinance (dólar) e plotly (gráficos)
@@ -8,11 +8,13 @@ import time
 import hashlib
 import sqlite3
 from io import BytesIO
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional, Tuple, List
 
 import pandas as pd
 import streamlit as st
+import urllib.parse as urlparse
+from calendar import monthrange
 
 # ======== USD opcional ========
 try:
@@ -50,8 +52,8 @@ def apply_global_styles():
         --finapp-bg-2:#FFFFFF;
         --finapp-primary:{PRIMARY_DARK_BLUE};
         --finapp-primary-2:{PRIMARY_BLUE_2};
-        --finapp-text:#0f172a;          /* TEXTO ESCURO GLOBAL */
-        --finapp-text-soft:#475569;     /* cinza médio para labels */
+        --finapp-text:#0f172a;
+        --finapp-text-soft:#475569;
         --finapp-border:#e6ebf2;
         --finapp-shadow:0 6px 18px rgba(14,42,71,0.08);
         --finapp-radius:16px;
@@ -65,7 +67,6 @@ def apply_global_styles():
         --ticker-height: 46px;
       }}
 
-      /* Remove faixa padrão do Streamlit e mantém topo limpo */
       div[data-testid="stDecoration"] {{ display:none !important; }}
       header[data-testid="stHeader"] {{ background: transparent !important; box-shadow: none !important; }}
 
@@ -73,7 +74,6 @@ def apply_global_styles():
       .stApp {{ background: var(--finapp-bg); color: var(--finapp-text); }}
       .block-container {{ overflow: visible !important; padding-top: .6rem; max-width: 1240px; }}
 
-      /* Títulos e textos padrão (evita transparências) */
       h1,h2,h3,h4,h5,h6 {{ color: var(--finapp-primary) !important; letter-spacing:.2px; }}
       .stMarkdown, .markdown-text-container, p, label, span, div {{ color: var(--finapp-text) !important; }}
       .finapp-muted {{ color: var(--finapp-text-soft) !important; }}
@@ -115,7 +115,6 @@ def apply_global_styles():
         color: var(--finapp-text) !important;
       }}
       .finapp-card * {{ color: var(--finapp-text) !important; }}
-      /* st.info/success/warning (banners de página) */
       [data-testid="stAlert"] {{
         background:#FFFFFF !important; border:1px solid var(--finapp-border) !important;
         color: var(--finapp-text) !important; border-radius: 14px !important; box-shadow: var(--finapp-shadow);
@@ -138,7 +137,7 @@ def apply_global_styles():
         color: var(--finapp-contrast) !important; fill: var(--finapp-contrast) !important;
       }}
 
-      /* Secundário (estilo "Sair" — também para "Marcar como conciliado") */
+      /* Secundário */
       .stButton > button[kind="secondary"], .stButton > button:not([kind]) {{
         background: transparent !important;
         color: var(--finapp-primary) !important;
@@ -160,14 +159,14 @@ def apply_global_styles():
       .stTextInput label, .stNumberInput label, .stDateInput label, .stSelectbox label {{ color: var(--finapp-text) !important; }}
       ::placeholder {{ color: var(--finapp-text-soft); opacity: 0.9; }}
 
-      /* ===== SELECTS (dropdown claro) ===== */
+      /* ===== SELECTS ===== */
       [data-baseweb="select"] * {{ background-color: #FFFFFF !important; color: var(--finapp-text) !important; }}
       div[role="combobox"] {{ background-color: #FFFFFF !important; color: var(--finapp-text) !important; border-radius: 12px !important; }}
       ul[role="listbox"], div[role="listbox"] {{ background-color: #FFFFFF !important; color: var(--finapp-text) !important; border: 1px solid #E5E7EB !important; }}
       li[role="option"] {{ background-color: #FFFFFF !important; color: var(--finapp-text) !important; }}
       li[role="option"][aria-selected="true"], li[role="option"]:hover {{ background-color: #EEF2FF !important; color: var(--finapp-text) !important; }}
 
-      /* ===== TABELAS (fundo claro + texto ESCURO e grade visível) ===== */
+      /* ===== TABELAS ===== */
       .stTable, .stDataFrame, .stDataFrame div, .stDataFrame table {{ background:#FFFFFF !important; color:#0f172a !important; }}
       [data-testid="stDataFrame"], [data-testid="stTable"] {{ color:#0f172a !important; }}
       [data-testid="stDataFrame"] *, [data-testid="stTable"] * {{ color:#0f172a !important; opacity:1 !important; }}
@@ -176,7 +175,7 @@ def apply_global_styles():
       .stDataFrame table tbody tr:nth-child(even) td {{ background:#FAFAFF !important; }}
       .stDataFrame table tbody tr:hover td {{ background:#F0F4FF !important; }}
 
-      /* ===== MÉTRICAS (cards da Home) ===== */
+      /* ===== MÉTRICAS ===== */
       [data-testid="stMetric"] {{
         background:#FFFFFF; border:1px solid var(--finapp-border);
         border-radius:14px; padding:10px 12px; box-shadow:var(--finapp-shadow);
@@ -184,7 +183,7 @@ def apply_global_styles():
       [data-testid="stMetricLabel"]{{ color:#64748b !important; font-weight:600 !important; }}
       [data-testid="stMetricValue"]{{ color:#0f172a !important; font-weight:800 !important; }}
 
-      /* ===== File Uploader (drag & drop) ===== */
+      /* ===== File Uploader ===== */
       [data-testid="stFileUploaderDropzone"],
       [data-testid="stFileUploader"] section {{
         background:#FFFFFF !important; border:1px solid #E5E7EB !important; color:#0f172a !important;
@@ -196,12 +195,10 @@ def apply_global_styles():
       .finapp-grid {{ display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); align-items: stretch; }}
       .finapp-grid-2 {{ display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); align-items: stretch; }}
 
-      /* Divisores finos */
       hr, .stDivider hr, div[role="separator"], div[data-testid="stDivider"] hr {{
         border: none !important; border-top: 1px solid var(--finapp-line-blue) !important; height: 0 !important; margin: 8px 0 !important;
       }}
 
-      /* Sidebar (mantém "Sair" translúcido) */
       section[data-testid="stSidebar"] {{ background: linear-gradient(180deg, var(--finapp-grad-1) 0%, var(--finapp-grad-2) 100%) !important; }}
       section[data-testid="stSidebar"] * {{ color: #e6edf7 !important; }}
       section[data-testid="stSidebar"] .stButton>button {{ background: #ffffff22 !important; border-color: #ffffff33 !important; color:#fff !important; }}
@@ -253,7 +250,6 @@ def do_rerun():
             pass
 
 def flash(msg: str, kind: str = "success", seconds: float = 3.0):
-    """Mostra um aviso por X segundos antes de continuar."""
     if   kind == "success": st.success(msg)
     elif kind == "info":    st.info(msg)
     elif kind == "warning": st.warning(msg)
@@ -294,6 +290,30 @@ def exec_sql(query: str, params: Tuple = ()) -> Optional[int]:
         st.error(f"Erro ao gravar no banco: {e}")
         return None
 
+# ===== Migrações seguras (evitam "duplicate column name") =====
+def _table_columns(table: str) -> List[str]:
+    try:
+        with _connect() as conn:
+            cur = conn.cursor()
+            cur.execute(f"PRAGMA table_info({table});")
+            cols = [str(r[1]).lower() for r in cur.fetchall()]
+            return cols
+    except Exception:
+        return []
+
+def add_column_if_not_exists(table: str, column_name: str, column_sql_def: str):
+    """Adiciona coluna (ALTER TABLE) somente se não existir. Silencioso em caso de corrida."""
+    column_name = column_name.lower().strip()
+    if column_name in _table_columns(table):
+        return
+    try:
+        with _connect() as conn:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_sql_def};")
+            conn.commit()
+    except Exception:
+        # Silenciar para evitar banner vermelho; se falhar aqui, a coluna provavelmente já existe.
+        pass
+
 # ====================== Bootstrap DB ======================
 def hash_password(pwd: str) -> str:
     return hashlib.sha256(pwd.encode("utf-8")).hexdigest()
@@ -319,6 +339,13 @@ def init_db():
                 name TEXT NOT NULL,
                 parent_id INTEGER,
                 kind TEXT CHECK(kind IN ('expense','income','tax','payroll')) NOT NULL DEFAULT 'expense'
+            );
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS sectors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE
             );
         """)
 
@@ -371,21 +398,35 @@ def init_db():
             );
         """)
 
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS users (
+        # --- Tabela de compromissos da Agenda ---
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS calendar_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                email TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                role TEXT NOT NULL DEFAULT 'user',
-                account_id INTEGER,
-                sectors TEXT,
-                is_active INTEGER NOT NULL DEFAULT 1,
+                title TEXT NOT NULL,
+                description TEXT,
+                date TEXT,                 -- data base (único) ou início (recorrente)
+                is_recurring INTEGER NOT NULL DEFAULT 0,
+                recur_rule TEXT,           -- 'daily'|'weekly'|'monthly'|'yearly' ou NULL
+                recur_until TEXT,          -- última data (opcional)
+                src_transaction_id INTEGER,
+                is_public INTEGER NOT NULL DEFAULT 0,
+                created_by INTEGER,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
         """)
 
         conn.commit()
+
+    # === Migrações seguras (só cria se faltar) ===
+    # transactions
+    add_column_if_not_exists("transactions", "show_on_calendar", "show_on_calendar INTEGER NOT NULL DEFAULT 0")
+    add_column_if_not_exists("transactions", "cal_is_recurring", "cal_is_recurring INTEGER NOT NULL DEFAULT 0")
+    add_column_if_not_exists("transactions", "cal_recur_rule", "cal_recur_rule TEXT")
+
+    # calendar_events: alguns bancos podem ter usado 'event_date' ao invés de 'date'
+    add_column_if_not_exists("calendar_events", "event_date", "event_date TEXT")
+    add_column_if_not_exists("calendar_events", "is_public", "is_public INTEGER NOT NULL DEFAULT 0")
+    add_column_if_not_exists("calendar_events", "created_by", "created_by INTEGER")
 
 def seed_minimums():
     if fetch_df("SELECT COUNT(*) as n FROM accounts").iloc[0, 0] == 0:
@@ -404,8 +445,36 @@ def seed_minimums():
         ]
         for n, p, k in base:
             exec_sql("INSERT INTO categories (name,parent_id,kind) VALUES (?,?,?)", (n, p, k))
+    if fetch_df("SELECT COUNT(*) as n FROM sectors").iloc[0, 0] == 0:
+        for s in ["Administrativo", "Produção", "Comercial", "Logística", "Outros"]:
+            exec_sql("INSERT INTO sectors (name) VALUES (?)", (s,))
 
-# ====================== Escopo (DEV) ======================
+# ===== Helper: coluna de data na tabela calendar_events pode variar =====
+_CAL_DATE_COL = None
+def _detect_calendar_date_col() -> str:
+    """Detecta se calendar_events usa 'date' ou 'event_date'. Se nenhuma existir, cria 'date'."""
+    try:
+        info = fetch_df("PRAGMA table_info(calendar_events)")
+        cols = [str(n).lower() for n in info.get("name", [])]
+        if "date" in cols:
+            return "date"
+        if "event_date" in cols:
+            return "event_date"
+    except Exception:
+        pass
+    try:
+        add_column_if_not_exists("calendar_events", "date", "date TEXT")
+        return "date"
+    except Exception:
+        return "date"
+
+def cal_date_col() -> str:
+    global _CAL_DATE_COL
+    if _CAL_DATE_COL is None:
+        _CAL_DATE_COL = _detect_calendar_date_col()
+    return _CAL_DATE_COL
+
+# ====================== Escopo (placeholder para multi-empresa) ======================
 def scope_filters(base_query: str, params: List) -> Tuple[str, List]:
     return base_query, params
 
@@ -462,33 +531,171 @@ def show_attachment_ui(path: str):
         st.info("Pré-visualização inline disponível apenas para imagens. Use o botão para baixar o arquivo.")
     st.download_button("⬇️ Baixar anexo", data=data, file_name=fname)
 
-# ====================== Entrada livre de dinheiro ======================
-def money_input(label: str, key: Optional[str] = None, value: str = "", help: Optional[str] = None) -> float:
-    """
-    Campo de texto que aceita valores com ponto OU vírgula e separador de milhar.
-    Retorna float (0.0 se vazio/ inválido).
-    """
-    raw = st.text_input(label, value=value, key=key, help=help, placeholder="0,00")
-    raw = (raw or "").strip().replace(" ", "")
-    if raw == "":
-        return 0.0
+# ====================== Agenda: helpers ======================
+def _parse_date(s: str) -> datetime:
+    return datetime.strptime(s, "%Y-%m-%d")
 
-    # Remove milhares e normaliza decimal (suporta "1.234,56" e "1,234.56")
-    cleaned = raw
-    if "," in cleaned and "." in cleaned:
-        cleaned = cleaned.replace(".", "").replace(",", ".")
+def add_calendar_event(
+    title: str,
+    dt: date,
+    description: str = "",
+    is_recurring: bool = False,
+    recur_rule: Optional[str] = None,
+    recur_until: Optional[date] = None,
+    src_transaction_id: Optional[int] = None,
+    is_public: bool = False,
+    created_by: Optional[int] = None,
+):
+    col = cal_date_col()
+    exec_sql(
+        f"""
+        INSERT INTO calendar_events (title, description, {col}, is_recurring, recur_rule, recur_until,
+                                     src_transaction_id, is_public, created_by)
+        VALUES (?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            title.strip(),
+            (description or "").strip(),
+            dt.isoformat(),
+            1 if is_recurring else 0,
+            (recur_rule or None),
+            (recur_until.isoformat() if recur_until else None),
+            src_transaction_id,
+            1 if is_public else 0,
+            created_by,
+        ),
+    )
+
+def update_calendar_event(eid: int, title: str, description: str, dt: date,
+                          is_recurring: bool, recur_rule: Optional[str], recur_until: Optional[date],
+                          is_public: bool):
+    col = cal_date_col()
+    exec_sql(
+        f"""
+        UPDATE calendar_events
+           SET title=?, description=?, {col}=?, is_recurring=?, recur_rule=?, recur_until=?, is_public=?
+         WHERE id=?
+        """,
+        (
+            title.strip(), (description or "").strip(), dt.isoformat(),
+            1 if is_recurring else 0, (recur_rule or None),
+            (recur_until.isoformat() if recur_until else None),
+            1 if is_public else 0,
+            int(eid),
+        ),
+    )
+
+def delete_calendar_event(eid: int):
+    exec_sql("DELETE FROM calendar_events WHERE id=?", (int(eid),))
+
+def duplicate_calendar_event(eid: int, new_owner_id: Optional[int] = None):
+    col = cal_date_col()
+    df = fetch_df(f"SELECT *, {col} AS ev_date FROM calendar_events WHERE id=?", (int(eid),))
+    if df.empty:
+        return
+    r = df.iloc[0]
+    base_dt = _parse_date(str(r["ev_date"])).date()
+
+    add_calendar_event(
+        title=f"{r['title']} (cópia)",
+        dt=base_dt,
+        description=(r.get("description") or ""),
+        is_recurring=bool(r.get("is_recurring", 0)),
+        recur_rule=(r.get("recur_rule") if pd.notna(r.get("recur_rule")) else None),
+        recur_until=(
+            _parse_date(str(r["recur_until"])).date()
+            if pd.notna(r.get("recur_until")) and r.get("recur_until")
+            else None
+        ),
+        src_transaction_id=(
+            int(r["src_transaction_id"]) if pd.notna(r.get("src_transaction_id")) else None
+        ),
+        is_public=bool(r.get("is_public", 0)),
+        created_by=(
+            new_owner_id
+            if new_owner_id is not None
+            else (int(r["created_by"]) if pd.notna(r.get("created_by"])) else None)
+        ),
+    )
+
+def _expand_event_occurrences(row: pd.Series, month_start: date, month_end: date) -> List[Tuple[date, int, str]]:
+    base = _parse_date(str(row["ev_date"])).date()
+    eid = int(row["id"])
+    title = str(row["title"])
+    is_rec = bool(row.get("is_recurring", 0))
+    rule = (row.get("recur_rule") if pd.notna(row.get("recur_rule")) else None)
+    until = (_parse_date(str(row["recur_until"])).date() if pd.notna(row.get("recur_until")) and row.get("recur_until") else None)
+
+    if not is_rec or not rule:
+        if month_start <= base <= month_end:
+            return [(base, eid, title)]
+        return []
+
+    cur = base
+    out = []
+    hard_limit = 400
+    steps = 0
+    while cur <= month_end and steps < hard_limit:
+        if cur >= month_start:
+            out.append((cur, eid, title))
+        if rule == "daily":
+            cur = cur + pd.Timedelta(days=1).to_pytimedelta()
+        elif rule == "weekly":
+            cur = cur + pd.Timedelta(weeks=1).to_pytimedelta()
+        elif rule == "monthly":
+            y, m = cur.year, cur.month
+            if m == 12:
+                y, m = y+1, 1
+            else:
+                m += 1
+            last = monthrange(y, m)[1]
+            d = min(cur.day, last)
+            cur = date(y, m, d)
+        elif rule == "yearly":
+            try:
+                cur = date(cur.year+1, cur.month, cur.day)
+            except ValueError:
+                cur = date(cur.year+1, cur.month, monthrange(cur.year+1, cur.month)[1])
+        else:
+            break
+        steps += 1
+        if until and cur > until:
+            break
+    return out
+
+def _get_user_id() -> Optional[int]:
+    u = st.session_state.get("user")
+    return int(u["id"]) if u and "id" in u else None
+
+def get_month_events(year: int, month: int, scope: str = "mine") -> List[Tuple[date, int, str]]:
+    """
+    scope: 'mine'  -> eventos públicos + privados do usuário logado
+           'public'-> apenas eventos públicos
+    """
+    uid = _get_user_id()
+    col = cal_date_col()
+    if scope == "public":
+        df = fetch_df(f"SELECT *, {col} AS ev_date FROM calendar_events WHERE is_public=1")
     else:
-        cleaned = cleaned.replace(",", ".")
+        if uid is not None:
+            df = fetch_df(
+                f"SELECT *, {col} AS ev_date FROM calendar_events WHERE (is_public=1) OR (is_public=0 AND created_by=?)",
+                (uid,),
+            )
+        else:
+            df = fetch_df(f"SELECT *, {col} AS ev_date FROM calendar_events WHERE is_public=1")
 
-    try:
-        val = float(cleaned)
-    except Exception:
-        val = 0.0
-    return val
+    month_start = date(year, month, 1)
+    month_end = date(year, month, monthrange(year, month)[1])
+    all_occ = []
+    for _, row in df.iterrows():
+        if pd.isna(row.get("ev_date")) or not str(row["ev_date"]).strip():
+            continue
+        all_occ.extend(_expand_event_occurrences(row, month_start, month_end))
+    return sorted(all_occ, key=lambda x: (x[0], x[1]))
 
 # ====================== Tabelas estáticas legíveis ======================
 def show_df(df: pd.DataFrame, empty_msg: str = "Sem dados para exibir."):
-    """Renderiza tabela estática (st.table) com fonte escura e grade visível."""
     if df is None or df.empty:
         st.info(empty_msg)
         return
@@ -527,14 +734,14 @@ def signup_widget():
                 else:
                     exec_sql(
                         "INSERT INTO users (name,email,password_hash,role,account_id,sectors,is_active) VALUES (?,?,?,?,?,?,1)",
-                        (name.strip(), email.strip().lower(), hash_password(pwd), "user", None, "",)
+                        (name.strip(), email.strip().lower(), hash_password(pwd), "launcher", None, "",)
                     )
                     user_id = int(fetch_df("SELECT id FROM users WHERE email=?", (email.strip().lower(),)).iloc[0]["id"])
                     st.session_state["user"] = {
                         "id": user_id,
                         "name": name.strip(),
                         "email": email.strip().lower(),
-                        "role": "user",
+                        "role": "launcher",
                         "account_id": None,
                         "sectors": [],
                     }
@@ -554,7 +761,7 @@ def login_widget() -> bool:
                     "id": int(u.iloc[0]["id"]),
                     "name": u.iloc[0]["name"],
                     "email": u.iloc[0]["email"],
-                    "role": "user",
+                    "role": u.iloc[0]["role"],
                     "account_id": int(u.iloc[0]["account_id"]) if pd.notna(u.iloc[0]["account_id"]) else None,
                     "sectors": [s.strip() for s in str(u.iloc[0]["sectors"] or "").split(",") if s.strip()],
                 }
@@ -565,7 +772,7 @@ def login_widget() -> bool:
 
     u = st.session_state["user"]
     with st.sidebar.container():
-        st.markdown(f"**{u['name']}**\n\n`{u['email']}`")
+        st.markdown(f"**{u['name']}**\n\n`{u['email']}`\n\n• Permissão: **{('Gerencial' if u['role']=='manager' else 'Lançador')}**")
         if st.sidebar.button("Sair"):
             del st.session_state["user"]
             do_rerun()
@@ -592,6 +799,23 @@ def kpis_cards():
     c3.metric("Saldo", money(saldo))
     st.markdown('</div>', unsafe_allow_html=True)
 
+# ====================== Entrada livre de dinheiro ======================
+def money_input(label: str, key: Optional[str] = None, value: str = "", help: Optional[str] = None) -> float:
+    raw = st.text_input(label, value=value, key=key, help=help, placeholder="0,00")
+    raw = (raw or "").strip().replace(" ", "")
+    if raw == "":
+        return 0.0
+    cleaned = raw
+    if "," in cleaned and "." in cleaned:
+        cleaned = cleaned.replace(".", "").replace(",", ".")
+    else:
+        cleaned = cleaned.replace(",", ".")
+    try:
+        val = float(cleaned)
+    except Exception:
+        val = 0.0
+    return val
+
 # ====================== Formulário genérico ======================
 def form_lancamento_generico(default_type: str = 'expense', label: str = "Novo lançamento", force_account_id: Optional[int] = None):
     st.markdown(f"### {label}")
@@ -599,7 +823,7 @@ def form_lancamento_generico(default_type: str = 'expense', label: str = "Novo l
     with st.form(f"form_{label}_{default_type}"):
         c1, c2, c3 = st.columns(3)
         dt_val = c1.date_input("Data", value=date.today())
-        amount = money_input("Valor (R$)", key=f"money_{label}_{default_type}")  # entrada livre
+        amount = money_input("Valor (R$)", key=f"money_{label}_{default_type}")
         method = c3.selectbox("Meio de Pagamento", ["pix", "ted", "boleto", "dinheiro", "cartão", "outro"]) if default_type != 'card' else "cartão"
 
         c4, c5, c6 = st.columns(3)
@@ -623,7 +847,8 @@ def form_lancamento_generico(default_type: str = 'expense', label: str = "Novo l
         cat_options = [(None, "—")] + [(int(r.id), r.name) for _, r in categories_df.iterrows()]
         cat = c5.selectbox("Categoria", options=cat_options, format_func=safe_label)
 
-        sector_options = ["Administrativo", "Produção", "Comercial", "Logística", "Outros"]
+        sectors_df = fetch_df("SELECT name FROM sectors ORDER BY name")
+        sector_options = [s for s in sectors_df["name"].tolist()] if not sectors_df.empty else ["Administrativo","Produção","Comercial","Logística","Outros"]
         sector = c6.selectbox("Setor", sector_options)
 
         c7, c8 = st.columns([2, 1])
@@ -635,6 +860,27 @@ def form_lancamento_generico(default_type: str = 'expense', label: str = "Novo l
         status_index = 1 if default_type != "income" else 0
         status = c10.selectbox("Status", ["planned", "paid", "overdue", "reconciled", "canceled"], index=status_index)
         attach = c11.file_uploader("Comprovante (opcional)", type=["pdf", "png", "jpg", "jpeg"])
+
+        st.markdown("---")
+        c12, c13, c14 = st.columns([1,1,1])
+        show_on_cal = c12.toggle("Agendar?", value=False, help="Exibir este lançamento na Agenda")
+        recur_kind = "único"
+        recur_rule = None
+        recur_until = None
+        is_public = False
+        if show_on_cal:
+            vis = c13.selectbox("Visibilidade", ["Privado", "Público"], index=0)
+            is_public = (vis == "Público")
+            recur_kind = c14.selectbox("Recorrência", ["único", "recorrente"], index=0)
+            if recur_kind == "recorrente":
+                c15, c16 = st.columns(2)
+                recur_rule = c15.selectbox(
+                    "Periodicidade",
+                    ["daily","weekly","monthly","yearly"], index=2,
+                    format_func=lambda x: {"daily":"Diária","weekly":"Semanal","monthly":"Mensal","yearly":"Anual"}[x]
+                )
+                default_until = dt_val + timedelta(days=30)
+                recur_until = c16.date_input("Repetir até (opcional)", value=default_until, key=f"until_{label}_{default_type}")
 
         submitted = st.form_submit_button("Salvar lançamento")
         if submitted:
@@ -653,21 +899,38 @@ def form_lancamento_generico(default_type: str = 'expense', label: str = "Novo l
                         flash(f"Falha ao salvar anexo: {e}", "error", 3)
 
                 account_id_final = force_account_id if force_account_id else (acc_value[0] if isinstance(acc_value, tuple) else None)
-                exec_sql(
+                trx_id = exec_sql(
                     """
                     INSERT INTO transactions (
                         trx_date, type, sector, cost_center_id, category_id, account_id,
-                        method, doc_number, counterparty, description, amount, status, origin, attachment_path
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        method, doc_number, counterparty, description, amount, status, origin, attachment_path,
+                        show_on_calendar, cal_is_recurring, cal_recur_rule
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?, ?, ?)
                     """,
                     (
                         dt_val.isoformat(), default_type, sector,
                         None,
                         (cat[0] if isinstance(cat, tuple) else None),
                         account_id_final,
-                        method, doc, party, desc, float(amount), status, "manual", attach_path
+                        method, doc, party, desc, float(amount), status, "manual", attach_path,
+                        (1 if show_on_cal else 0),
+                        (1 if (show_on_cal and recur_kind=="recorrente") else 0),
+                        (recur_rule if (show_on_cal and recur_kind=="recorrente") else None)
                     ),
                 )
+                if show_on_cal:
+                    title = (desc.strip() or f"{'Receita' if default_type=='income' else 'Despesa'} - {money(amount)}").strip()
+                    add_calendar_event(
+                        title=title,
+                        dt=dt_val,
+                        description=f"Vinculado ao lançamento #{trx_id}",
+                        is_recurring=(recur_kind=="recorrente"),
+                        recur_rule=recur_rule,
+                        recur_until=recur_until,
+                        src_transaction_id=int(trx_id) if trx_id else None,
+                        is_public=is_public,
+                        created_by=_get_user_id()
+                    )
                 flash("Lançamento salvo com sucesso.", "success", 3)
                 do_rerun()
     st.markdown('</div>', unsafe_allow_html=True)
@@ -720,7 +983,7 @@ def tabela_lancamentos_filtro():
                 st.info("Este lançamento não possui anexo salvo.")
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ====================== Páginas ======================
+# ====================== Páginas principais ======================
 def _fluxo_caixa_df():
     q = """
         SELECT
@@ -899,7 +1162,7 @@ def page_extratos():
     st.markdown('<div class="finapp-card">', unsafe_allow_html=True)
     accs = fetch_df("SELECT id, name, type FROM accounts ORDER BY name")
     if accs.empty:
-        st.info("Cadastre ao menos uma conta em 'accounts' (seed já inclui duas).")
+        st.info("Cadastre ao menos uma conta em 'Configurações > Campos do formulário > Contas'.")
         st.markdown('</div>', unsafe_allow_html=True)
         return
 
@@ -997,6 +1260,422 @@ def page_relatorios():
         export_csv(dfc, "resumo_categoria.csv")
     st.markdown('</div>', unsafe_allow_html=True)
 
+# ====================== Página Configurações ======================
+def section_campos_formulario():
+    st.markdown("### Campos do formulário")
+    st.markdown('<div class="finapp-card">', unsafe_allow_html=True)
+    sub_tabs = st.tabs(["Contas", "Categorias", "Setores"])
+
+    with sub_tabs[0]:
+        st.markdown("#### Contas")
+        c1, c2, c3, c4 = st.columns(4)
+        nm = c1.text_input("Nome da conta")
+        tipo = c2.selectbox("Tipo", ["bank","cash","card"], index=0)
+        inst = c3.text_input("Instituição")
+        num = c4.text_input("Número")
+        if st.button("Adicionar conta"):
+            if nm.strip():
+                exec_sql("INSERT INTO accounts (name,type,institution,number) VALUES (?,?,?,?)", (nm.strip(), tipo, inst.strip(), num.strip()))
+                flash("Conta adicionada.", "success", 3)
+                do_rerun()
+            else:
+                flash("Informe o nome da conta.", "warning", 3)
+
+        df = fetch_df("SELECT id, name AS Nome, type AS Tipo, institution AS Instituição, number AS Número FROM accounts ORDER BY name")
+        show_df(df, "Nenhuma conta cadastrada.")
+        del_id = st.number_input("ID da conta para excluir", min_value=0, step=1, key="acc_del_id")
+        if st.button("Excluir conta", key="btn_del_acc", type="secondary"):
+            if del_id and del_id in (df["id"].tolist() if not df.empty else []):
+                exec_sql("DELETE FROM accounts WHERE id=?", (int(del_id),))
+                flash("Conta excluída.", "success", 3)
+                do_rerun()
+            else:
+                flash("ID não encontrado.", "error", 3)
+
+    with sub_tabs[1]:
+        st.markdown("#### Categorias")
+        c1, c2 = st.columns(2)
+        nm = c1.text_input("Nome da categoria")
+        kind = c2.selectbox("Tipo", ["expense","income","tax","payroll"], index=0)
+        if st.button("Adicionar categoria"):
+            if nm.strip():
+                exec_sql("INSERT INTO categories (name, parent_id, kind) VALUES (?,?,?)", (nm.strip(), None, kind))
+                flash("Categoria adicionada.", "success", 3)
+                do_rerun()
+            else:
+                flash("Informe o nome da categoria.", "warning", 3)
+
+        df = fetch_df("SELECT id, name AS Nome, kind AS Tipo FROM categories ORDER BY kind, name")
+        show_df(df, "Nenhuma categoria cadastrada.")
+        del_id = st.number_input("ID da categoria para excluir", min_value=0, step=1, key="cat_del_id")
+        if st.button("Excluir categoria", key="btn_del_cat", type="secondary"):
+            if del_id and del_id in (df["id"].tolist() if not df.empty else []):
+                exec_sql("DELETE FROM categories WHERE id=?", (int(del_id),))
+                flash("Categoria excluída.", "success", 3)
+                do_rerun()
+            else:
+                flash("ID não encontrado.", "error", 3)
+
+    with sub_tabs[2]:
+        st.markdown("#### Setores")
+        nm = st.text_input("Nome do setor")
+        if st.button("Adicionar setor"):
+            if nm.strip():
+                ok = exec_sql("INSERT OR IGNORE INTO sectors (name) VALUES (?)", (nm.strip(),))
+                if ok is None:
+                    flash("Falha ao adicionar setor (talvez duplicado).", "error", 3)
+                else:
+                    flash("Setor adicionado.", "success", 3)
+                do_rerun()
+            else:
+                flash("Informe o nome do setor.", "warning", 3)
+
+        df = fetch_df("SELECT id, name AS Setor FROM sectors ORDER BY name")
+        show_df(df, "Nenhum setor cadastrado.")
+        del_id = st.number_input("ID do setor para excluir", min_value=0, step=1, key="sec_del_id")
+        if st.button("Excluir setor", key="btn_del_sec", type="secondary"):
+            if del_id and del_id in (df["id"].tolist() if not df.empty else []):
+                exec_sql("DELETE FROM sectors WHERE id=?", (int(del_id),))
+                flash("Setor excluído.", "success", 3)
+                do_rerun()
+            else:
+                flash("ID não encontrado.", "error", 3)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def section_usuarios_permissoes():
+    st.markdown("### Usuários & Permissões")
+    st.markdown('<div class="finapp-card">', unsafe_allow_html=True)
+
+    have_manager = fetch_df("SELECT COUNT(*) as n FROM users WHERE role='manager'")
+    if not have_manager.empty and have_manager.iloc[0,0] == 0:
+        st.warning("Não há nenhum usuário com permissão **Gerencial**. Você pode tornar-se gerente agora.")
+        if st.button("🔓 Tornar-me gerente"):
+            u = st.session_state.get("user", None)
+            if u:
+                exec_sql("UPDATE users SET role='manager' WHERE id=?", (int(u["id"]),))
+                st.session_state["user"]["role"] = "manager"
+                flash("Permissão elevada para Gerencial.", "success", 3)
+                do_rerun()
+
+    is_mgr = (st.session_state.get("user", {}).get("role") == "manager")
+
+    df = fetch_df("SELECT id, name as Nome, email as Email, role as Permissão, is_active as Ativo FROM users ORDER BY created_at DESC")
+    show_df(df, "Nenhum usuário cadastrado.")
+
+    if is_mgr and not df.empty:
+        st.markdown("---")
+        st.subheader("Editar usuário")
+        c1, c2, c3 = st.columns(3)
+        uid = c1.number_input("ID do usuário", min_value=0, step=1)
+        role = c2.selectbox("Permissão", ["launcher","manager"], index=0)
+        ativo = c3.selectbox("Status", ["Ativo","Inativo"], index=0)
+        if st.button("Salvar alterações no usuário"):
+            ids = df["id"].tolist()
+            if uid and uid in ids:
+                exec_sql("UPDATE users SET role=?, is_active=? WHERE id=?", (role, 1 if ativo=="Ativo" else 0, int(uid)))
+                flash("Usuário atualizado.", "success", 3)
+                do_rerun()
+            else:
+                flash("ID não encontrado.", "error", 3)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def section_cadastros():
+    st.markdown("### Cadastros (Clientes & Fornecedores)")
+    st.markdown('<div class="finapp-card">', unsafe_allow_html=True)
+    tabs = st.tabs(["Clientes", "Fornecedores"])
+
+    with tabs[0]:
+        st.markdown("#### Novo cliente")
+        c1, c2 = st.columns(2)
+        name = c1.text_input("Nome/Razão social", key="cli_name")
+        doc  = c2.text_input("Documento (CPF/CNPJ)", key="cli_doc")
+        c3, c4, c5 = st.columns(3)
+        contact = c3.text_input("Contato", key="cli_contact")
+        phone   = c4.text_input("Telefone", key="cli_phone")
+        email   = c5.text_input("E-mail", key="cli_email")
+        notes = st.text_area("Observações", key="cli_notes", placeholder="Informações adicionais...")
+
+        if st.button("Adicionar cliente", key="cli_add_btn"):
+            if name.strip():
+                exec_sql("INSERT INTO clients (name, doc, contact, phone, email, notes, is_active) VALUES (?,?,?,?,?,?,1)",
+                         (name.strip(), doc.strip(), contact.strip(), phone.strip(), email.strip(), notes.strip()))
+                flash("Cliente adicionado.", "success", 3)
+                do_rerun()
+            else:
+                flash("Informe o nome do cliente.", "warning", 3)
+
+        st.markdown("---")
+        df = fetch_df("SELECT id, name AS Nome, doc AS Documento, contact AS Contato, phone AS Telefone, email AS Email, is_active AS Ativo FROM clients ORDER BY created_at DESC")
+        show_df(df, "Nenhum cliente cadastrado.")
+
+        c6, c7, c8 = st.columns(3)
+        cid = c6.number_input("ID para (des)ativar/apagar", min_value=0, step=1, key="cli_id_edit")
+        ac  = c7.selectbox("Ação", ["Ativar","Inativar","Apagar"], key="cli_action")
+        if st.button("Executar ação", key="cli_exec", type="secondary"):
+            ids = df["id"].tolist() if not df.empty else []
+            if cid and cid in ids:
+                if ac == "Apagar":
+                    exec_sql("DELETE FROM clients WHERE id=?", (int(cid),))
+                    flash("Cliente apagado.", "success", 3)
+                else:
+                    exec_sql("UPDATE clients SET is_active=? WHERE id=?", (1 if ac=="Ativar" else 0, int(cid)))
+                    flash("Cliente atualizado.", "success", 3)
+                do_rerun()
+            else:
+                flash("ID não encontrado.", "error", 3)
+
+    with tabs[1]:
+        st.markdown("#### Novo fornecedor")
+        c1, c2 = st.columns(2)
+        name = c1.text_input("Nome/Razão social", key="for_name")
+        doc  = c2.text_input("Documento (CPF/CNPJ)", key="for_doc")
+        c3, c4, c5 = st.columns(3)
+        contact = c3.text_input("Contato", key="for_contact")
+        phone   = c4.text_input("Telefone", key="for_phone")
+        email   = c5.text_input("E-mail", key="for_email")
+        notes = st.text_area("Observações", key="for_notes", placeholder="Informações adicionais...")
+
+        if st.button("Adicionar fornecedor", key="for_add_btn"):
+            if name.strip():
+                exec_sql("INSERT INTO suppliers (name, doc, contact, phone, email, notes, is_active) VALUES (?,?,?,?,?,?,1)",
+                         (name.strip(), doc.strip(), contact.strip(), phone.strip(), email.strip(), notes.strip()))
+                flash("Fornecedor adicionado.", "success", 3)
+                do_rerun()
+            else:
+                flash("Informe o nome do fornecedor.", "warning", 3)
+
+        st.markdown("---")
+        df = fetch_df("SELECT id, name AS Nome, doc AS Documento, contact AS Contato, phone AS Telefone, email AS Email, is_active AS Ativo FROM suppliers ORDER BY created_at DESC")
+        show_df(df, "Nenhum fornecedor cadastrado.")
+
+        c6, c7, c8 = st.columns(3)
+        sid = c6.number_input("ID para (des)ativar/apagar", min_value=0, step=1, key="for_id_edit")
+        ac  = c7.selectbox("Ação", ["Ativar","Inativar","Apagar"], key="for_action")
+        if st.button("Executar ação", key="for_exec", type="secondary"):
+            ids = df["id"].tolist() if not df.empty else []
+            if sid and sid in ids:
+                if ac == "Apagar":
+                    exec_sql("DELETE FROM suppliers WHERE id=?", (int(sid),))
+                    flash("Fornecedor apagado.", "success", 3)
+                else:
+                    exec_sql("UPDATE suppliers SET is_active=? WHERE id=?", (1 if ac=="Ativar" else 0, int(sid)))
+                    flash("Fornecedor atualizado.", "success", 3)
+                do_rerun()
+            else:
+                flash("ID não encontrado.", "error", 3)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def page_configuracoes():
+    st.markdown("## Configurações")
+    tabs = st.tabs(["Campos do formulário", "Usuários & Permissões", "Cadastros"])
+    with tabs[0]:
+        section_campos_formulario()
+    with tabs[1]:
+        section_usuarios_permissoes()
+    with tabs[2]:
+        section_cadastros()
+
+# ====================== Página Agenda (Minha & Pública) ======================
+def _render_big_calendar(year: int, month: int, scope: str):
+    first_wday, days_in_month = monthrange(year, month)
+    weeks = [[]]
+    for _ in range(first_wday):
+        weeks[0].append({"day": "", "events": []})
+
+    occ = get_month_events(year, month, scope=scope)  # [(date, id, title)]
+    events_by_day = {}
+    for d, eid, title in occ:
+        events_by_day.setdefault(d.day, []).append((eid, title))
+
+    day = 1
+    while day <= days_in_month:
+        if len(weeks[-1]) == 7:
+            weeks.append([])
+        evs = events_by_day.get(day, [])
+        weeks[-1].append({"day": day, "events": evs})
+        day += 1
+    while len(weeks[-1]) < 7:
+        weeks[-1].append({"day": "", "events": []})
+
+    html = ['<div class="finapp-card"><div style="overflow-x:auto;">']
+    html.append("""
+    <table style="width:100%; border-collapse:separate; border-spacing:8px;">
+      <thead>
+        <tr>
+          <th>Dom</th><th>Seg</th><th>Ter</th><th>Qua</th><th>Qui</th><th>Sex</th><th>Sáb</th>
+        </tr>
+      </thead>
+      <tbody>
+    """)
+    for w in weeks:
+        html.append("<tr>")
+        for cell in w:
+            day_label = f"<div style='font-weight:700'>{cell['day']}</div>" if cell["day"] != "" else "&nbsp;"
+            ev_html = ""
+            for eid, title in cell["events"][:4]:
+                safe = str(title).replace("<","&lt;").replace(">","&gt;")
+                ev_html += f"<div style='margin-top:6px; padding:6px 8px; border:1px solid var(--finapp-border); border-radius:10px; background:var(--finapp-bg-2); box-shadow:var(--finapp-shadow); font-size:0.9rem;'>#{eid} — {safe}</div>"
+            html.append(f"<td style='vertical-align:top; min-width:140px; height:120px; background:#fff; border:1px solid var(--finapp-border); border-radius:12px; padding:8px;'>{day_label}{ev_html}</td>")
+        html.append("</tr>")
+    html.append("</tbody></table></div></div>")
+    st.markdown("".join(html), unsafe_allow_html=True)
+
+def _event_share_links(title: str, dt_ev: date, is_rec: bool, recur_rule: Optional[str], desc: str) -> Tuple[str, str]:
+    subj = f"Compromisso: {title}"
+    body = f"Título: {title}\\nData: {dt_ev.strftime('%d/%m/%Y')}\\nRecorrente: {'Sim' if is_rec else 'Não'}\\n"
+    if is_rec and recur_rule:
+        body += f"Periodicidade: {{'daily':'Diária','weekly':'Semanal','monthly':'Mensal','yearly':'Anual'}}[{repr(recur_rule)}]\\n"
+    if desc:
+        body += f"Notas: {desc}\\n"
+    mailto = f"mailto:?subject={urlparse.quote(subj)}&body={urlparse.quote(body)}"
+    wa = f"https://wa.me/?text={urlparse.quote(subj + '\\n' + body)}"
+    return mailto, wa
+
+def _event_detail_form(eid: int):
+    col = cal_date_col()
+    df = fetch_df(f"SELECT *, {col} AS ev_date FROM calendar_events WHERE id=?", (int(eid),))
+    if df.empty:
+        st.warning("Compromisso não encontrado.")
+        return
+    r = df.iloc[0]
+    owner = int(r["created_by"]) if pd.notna(r.get("created_by")) else None
+    uid = _get_user_id()
+    can_edit = (uid is not None) and (uid == owner or st.session_state.get("user",{}).get("role")=="manager")
+
+    with st.form(f"event_edit_{eid}"):
+        c1, c2 = st.columns([2,1])
+        title = c1.text_input("Título", value=str(r["title"]), disabled=not can_edit)
+        dt_ev = c2.date_input("Data base", value=_parse_date(str(r["ev_date"])).date(), disabled=not can_edit)
+        desc = st.text_area("Descrição/Notas", value=(r["description"] or ""), disabled=not can_edit)
+
+        c3, c4, c5 = st.columns(3)
+        is_rec = c3.toggle("Recorrente?", value=bool(r["is_recurring"]), disabled=not can_edit)
+        recur_rule = (r["recur_rule"] if pd.notna(r["recur_rule"]) else None)
+        recur_until_val = (_parse_date(str(r["recur_until"])).date() if pd.notna(r["recur_until"]) and r["recur_until"] else None)
+
+        c6 = st.columns(1)[0]
+        vis_label = "Público" if int(r.get("is_public",0))==1 else "Privado"
+        vis_new = c6.selectbox("Visibilidade", ["Privado","Público"], index=(1 if vis_label=="Público" else 0), disabled=not can_edit)
+
+        if is_rec and can_edit:
+            recur_rule = c4.selectbox("Periodicidade", ["daily","weekly","monthly","yearly"],
+                                      index=(["daily","weekly","monthly","yearly"].index(recur_rule) if recur_rule in ["daily","weekly","monthly","yearly"] else 2),
+                                      format_func=lambda x: {"daily":"Diária","weekly":"Semanal","monthly":"Mensal","yearly":"Anual"}[x])
+            recur_until_val = c5.date_input("Repetir até (opcional)", value=(recur_until_val or (dt_ev + timedelta(days=30))))
+        elif not is_rec:
+            recur_rule = None
+            recur_until_val = None
+
+        if owner:
+            st.caption(f"Criado por usuário #{owner}")
+
+        c7, c8, c9, c10 = st.columns(4)
+        save = c7.form_submit_button("💾 Salvar alterações", disabled=not can_edit)
+        dup  = c8.form_submit_button("📄 Duplicar")
+        delete = c9.form_submit_button("🗑️ Excluir", type="secondary", disabled=not can_edit)
+        share = c10.form_submit_button("📤 Enviar (e-mail/WhatsApp)")
+
+    if delete:
+        delete_calendar_event(int(eid))
+        flash("Compromisso excluído.", "success", 3)
+        do_rerun()
+    elif dup:
+        duplicate_calendar_event(int(eid), new_owner_id=_get_user_id())
+        flash("Compromisso duplicado.", "success", 3)
+        do_rerun()
+    elif save and can_edit:
+        update_calendar_event(
+            int(eid), title, desc, dt_ev, is_rec, recur_rule, recur_until_val,
+            is_public=(vis_new=="Público")
+        )
+        flash("Compromisso atualizado.", "success", 3)
+        do_rerun()
+    elif share:
+        mailto, wa = _event_share_links(title, dt_ev, is_rec, recur_rule, desc)
+        st.markdown('<div class="finapp-card">', unsafe_allow_html=True)
+        st.markdown("**Compartilhar compromisso:**")
+        st.markdown(f"- 📧 [Abrir e-mail preparado]({mailto})")
+        st.markdown(f"- 💬 [Enviar no WhatsApp]({wa})")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+def page_agenda():
+    st.markdown("## Agenda")
+    tabs = st.tabs(["Minha Agenda", "Calendário Público"])
+
+    # ===== Minha Agenda: públicos + meus privados =====
+    with tabs[0]:
+        c1, c2, _ = st.columns([1,1,2])
+        today = date.today()
+        year = c1.number_input("Ano", min_value=2000, max_value=2100, value=today.year, step=1, key="ag_my_year")
+        month = c2.number_input("Mês", min_value=1, max_value=12, value=today.month, step=1, key="ag_my_month")
+        _render_big_calendar(int(year), int(month), scope="mine")
+
+        st.markdown("### Novo compromisso")
+        with st.form("form_new_event_mine"):
+            c4, c5 = st.columns([2,1])
+            title = c4.text_input("Título", placeholder="Ex.: Reunião com fornecedor")
+            dt_ev  = c5.date_input("Data", value=today)
+            desc = st.text_area("Descrição/Notas", placeholder="Detalhes do compromisso")
+
+            c6, c7, c8 = st.columns(3)
+            is_rec = c6.toggle("Recorrente?", value=False)
+            vis = c7.selectbox("Visibilidade", ["Privado","Público"], index=0)
+            recur_rule = None
+            recur_until = None
+            if is_rec:
+                recur_rule = c8.selectbox("Periodicidade", ["daily","weekly","monthly","yearly"], index=2,
+                                          format_func=lambda x: {"daily":"Diária","weekly":"Semanal","monthly":"Mensal","yearly":"Anual"}[x])
+                recur_until = st.date_input("Repetir até (opcional)", value=today + timedelta(days=30), key="my_until")
+            ok = st.form_submit_button("Adicionar compromisso")
+            if ok:
+                if not title.strip():
+                    flash("Informe o título do compromisso.", "warning", 3)
+                else:
+                    add_calendar_event(
+                        title=title, dt=dt_ev, description=desc,
+                        is_recurring=is_rec, recur_rule=recur_rule, recur_until=recur_until,
+                        is_public=(vis=="Público"), created_by=_get_user_id()
+                    )
+                    flash("Compromisso adicionado.", "success", 3)
+                    do_rerun()
+
+        st.markdown("---")
+        st.markdown("### Compromissos do mês (abrir/editar)")
+        occ = get_month_events(int(year), int(month), scope="mine")
+        if not occ:
+            st.info("Sem compromissos no mês selecionado.")
+        else:
+            ids = [eid for _, eid, _ in occ]
+            labels = [f"{d.strftime('%d/%m')} · #{eid} · {title}" for d, eid, title in occ]
+            options = list(zip(ids, labels))
+            sel = st.selectbox("Escolha um compromisso", options=options, format_func=lambda x: x[1])
+            if sel:
+                _event_detail_form(int(sel[0]))
+
+    # ===== Calendário Público =====
+    with tabs[1]:
+        c1, c2, _ = st.columns([1,1,2])
+        today = date.today()
+        year = c1.number_input("Ano", min_value=2000, max_value=2100, value=today.year, step=1, key="ag_pub_year")
+        month = c2.number_input("Mês", min_value=1, max_value=12, value=today.month, step=1, key="ag_pub_month")
+        _render_big_calendar(int(year), int(month), scope="public")
+
+        st.markdown("---")
+        st.markdown("### Compromissos públicos do mês (abrir)")
+        occ = get_month_events(int(year), int(month), scope="public")
+        if not occ:
+            st.info("Sem compromissos públicos no mês selecionado.")
+        else:
+            ids = [eid for _, eid, _ in occ]
+            labels = [f"{d.strftime('%d/%m')} · #{eid} · {title}" for d, eid, title in occ]
+            options = list(zip(ids, labels))
+            sel = st.selectbox("Escolha um compromisso público", options=options, format_func=lambda x: x[1], key="pub_sel")
+            if sel:
+                _event_detail_form(int(sel[0]))
+
 # ====================== Layout principal ======================
 def main():
     init_db()
@@ -1010,7 +1689,7 @@ def main():
     if not logged:
         st.stop()
 
-    tabs = st.tabs(["Home", "Receitas e Despesas", "Extratos", "Conciliação", "Relatórios e Dashboard"])
+    tabs = st.tabs(["Home", "Receitas e Despesas", "Extratos", "Conciliação", "Relatórios e Dashboard", "Agenda", "Configurações"])
     with tabs[0]:
         page_home()
     with tabs[1]:
@@ -1021,6 +1700,10 @@ def main():
         page_conciliacao()
     with tabs[4]:
         page_relatorios()
+    with tabs[5]:
+        page_agenda()
+    with tabs[6]:
+        page_configuracoes()
 
 if __name__ == "__main__":
     main()
